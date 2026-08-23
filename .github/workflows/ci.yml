@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install locked dependencies
+        run: uv sync --locked --python ${{ matrix.python-version }}
+      - name: Run pre-commit
+        run: uv run pre-commit run --all-files
+      - name: Run type checking
+        run: uv run pyright
+      - name: Run tests with coverage
+        run: uv run pytest --cov=flip7 --cov-report=term-missing --cov-report=xml
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  package:
+    name: Build and inspect package
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install locked dependencies
+        run: uv sync --locked --python 3.12
+      - name: Build distributions
+        run: uv build
+      - name: Verify wheel installation
+        run: |
+          uv venv --python 3.12 /tmp/flip7-package-check
+          uv pip install --python /tmp/flip7-package-check/bin/python dist/*.whl
+          /tmp/flip7-package-check/bin/python -c "import flip7; assert flip7.__version__ == '0.1.0'"
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/

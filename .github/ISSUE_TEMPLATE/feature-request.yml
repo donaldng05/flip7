@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a focused improvement to the research platform.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or research question
+      description: What user, engineering, or research need would this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the smallest useful change and its scope.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Describe tests, metrics, or experiments that would demonstrate success.
+    validations:
+      required: true
