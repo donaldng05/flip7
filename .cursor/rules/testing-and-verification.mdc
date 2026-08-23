@@ -1,0 +1,20 @@
+---
+description: Test-first and evidence-based verification standards for Flip 7 tests
+globs: tests/**/*.py
+alwaysApply: false
+---
+
+# Testing and Verification
+
+- Write one focused failing test before implementing new behavior, then verify
+  the expected failure and the passing result.
+- Use unit tests for mechanics, integration tests for complete rounds/games,
+  and deterministic seeded tests for randomness.
+- Test public behavior and legal transitions rather than implementation details.
+- Keep training and evaluation tests separate; use small fixtures and bounded
+  runs.
+- Run `uv run pytest`, `uv run pyright`, `uv run ruff check .`, and
+  `uv run ruff format --check .` as appropriate.
+- On Windows use `scripts/check.ps1`; on Linux/macOS use
+  `bash scripts/check.sh`.
+- Do not claim a test, build, or workflow passes without fresh command output.

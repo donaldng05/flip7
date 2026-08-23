@@ -1,0 +1,18 @@
+---
+description: Documentation and decision-record conventions for the Flip 7 project
+globs: docs/**/*.md, README.md, CONTRIBUTING.md, CHANGELOG.md
+alwaysApply: false
+---
+
+# Documentation Workflow
+
+- Keep `docs/project-overview.md`, `docs/requirements-and-scope.md`, and
+  `docs/project-plan.md` consistent with one another.
+- Preserve the project scope: strategic Flip 7 learning and evaluation, not
+  computer vision, a commercial product, or premature cloud deployment.
+- Record durable technology, architecture, reproducibility, and deployment
+  decisions as ADRs under `docs/adr/`.
+- Prefer concise, testable statements and concrete commands over vague intent.
+- Update links and phase names when a roadmap milestone changes.
+- Keep implementation instructions aligned with `docs/engineering-standards.md`
+  and `CONTRIBUTING.md`; do not create conflicting policy copies.

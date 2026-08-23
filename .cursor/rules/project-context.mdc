@@ -1,0 +1,18 @@
+---
+description: Persistent context for the Flip 7 reinforcement-learning research platform
+alwaysApply: true
+---
+
+# Flip 7 Project Context
+
+- This is a Python research platform for strategic Flip 7 agents, not yet a
+  finished game or production service.
+- Read the relevant documents in `docs/` before making architecture decisions:
+  `project-overview.md`, `requirements-and-scope.md`, and `project-plan.md`.
+- The current milestone is repository guidance and engineering infrastructure.
+  The next milestone is the authoritative rules specification.
+- Do not invent or implement game rules until that specification is approved.
+- Keep these package boundaries one-way:
+  `core` → `envs` → agents/training/evaluation; `config` is an input boundary.
+- Preserve correctness, reproducibility, modularity, and measurement before
+  optimization or heavyweight infrastructure.

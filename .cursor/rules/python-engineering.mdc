@@ -1,0 +1,19 @@
+---
+description: Python implementation conventions for Flip 7 source modules
+globs: src/**/*.py
+alwaysApply: false
+---
+
+# Python Engineering
+
+- Use the `src/` layout and keep imports at module scope.
+- Add explicit types to public interfaces and keep modules focused.
+- Preserve dependency direction: core must not import agents, training,
+  evaluation, or RL frameworks.
+- Pass randomness through explicit seeds or isolated RNG objects; do not rely on
+  hidden global random state.
+- Add tests before implementing behavior and keep the smallest useful change.
+- Read `docs/engineering-standards.md` and `CONTRIBUTING.md` when conventions
+  are unclear.
+- Do not add NumPy, RL, distributed-training, tracking, or serving dependencies
+  without a concrete roadmap need and recorded rationale.

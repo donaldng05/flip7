@@ -1,0 +1,20 @@
+---
+description: Reproducibility standards for Flip 7 configurations, training, and evaluation
+globs: configs/**/*, src/flip7/training/**/*.py, src/flip7/evaluation/**/*.py
+alwaysApply: false
+---
+
+# Research Reproducibility
+
+- Drive experiments from version-controlled configuration files under
+  `configs/`; do not hide hyperparameters in source code.
+- Record the code version, `uv.lock`, configuration, seed set, player count,
+  observation/reward choices, opponents, and output location.
+- Keep training opponents separate from known and previously unseen evaluation
+  opponents when measuring generalization.
+- Use bounded smoke runs before expensive training or tournaments.
+- Preserve machine-readable results and enough metadata to reproduce them.
+- Report game win rate plus relevant secondary metrics from
+  `docs/requirements-and-scope.md`.
+- Keep checkpoints, logs, datasets, and metrics out of Git unless deliberately
+  curated.
