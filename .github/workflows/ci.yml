@@ -36,7 +36,7 @@ jobs:
         run: uv run pytest --cov=flip7 --cov-report=term-missing --cov-report=xml
       - name: Upload coverage report
         if: matrix.python-version == '3.12'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-xml
           path: coverage.xml
@@ -65,7 +65,7 @@ jobs:
           uv pip install --python /tmp/flip7-package-check/bin/python dist/*.whl
           /tmp/flip7-package-check/bin/python -c "import flip7; assert flip7.__version__ == '0.1.0'"
       - name: Upload distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-distributions
           path: dist/
