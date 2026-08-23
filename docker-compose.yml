@@ -1,0 +1,17 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /workspace
+    volumes:
+      - ./src:/workspace/src
+      - ./tests:/workspace/tests
+      - ./scripts:/workspace/scripts
+      - ./configs:/workspace/configs
+      - ./docs:/workspace/docs
+      - uv-cache:/home/app/.cache/uv
+    command: bash scripts/check.sh
+
+volumes:
+  uv-cache:
