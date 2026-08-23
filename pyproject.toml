@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flip7"
+version = "0.1.0"
+description = "Research software for reinforcement-learning agents playing Flip 7."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "Donald Nguyen" }]
+dependencies = ["pyyaml>=6.0"]
+
+[dependency-groups]
+dev = [
+  "pre-commit>=4.3",
+  "pyright>=1.1.390",
+  "pytest>=8.4",
+  "pytest-cov>=6.2",
+  "ruff>=0.12",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flip7"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-markers", "--strict-config"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = [".venv", "build", "dist"]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+
+[tool.coverage.run]
+branch = true
+source = ["flip7"]
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:"]
+fail_under = 80
+show_missing = true
