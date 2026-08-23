@@ -1,0 +1,4 @@
+# Foundation configuration only. Game and training settings will be added by
+# their respective roadmap phases.
+seed: 7
+players: 2
