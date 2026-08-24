@@ -8,15 +8,20 @@ from flip7.agents.baselines import (
     RandomLegalAgent,
     RoundDPAgent,
 )
+from flip7.agents.learned import ActorCritic, PPOAgent, masked_logits, seed_torch
 
 __all__ = [
     "ActionMask",
+    "ActorCritic",
     "Agent",
     "AgentFactory",
     "BustProbabilityAgent",
     "ExpectedValueAgent",
     "FixedThresholdAgent",
     "Observation",
+    "PPOAgent",
     "RandomLegalAgent",
     "RoundDPAgent",
+    "masked_logits",
+    "seed_torch",
 ]
