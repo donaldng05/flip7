@@ -2,8 +2,9 @@
 
 ## Scope of this milestone
 
-Phase 4 extends the approved RL environment with observation-only baseline
-policies and reproducible AEC evaluation. It does not train learned policies.
+Phase 5 extends the approved RL environment with a custom PyTorch PPO trainer,
+checkpointing, and evaluation of a learned policy against frozen baselines.
+Self-play, recurrent policies, and distributed training remain later work.
 
 ## Tooling
 
@@ -43,6 +44,7 @@ metric calculations with small deterministic fixtures.
 ## Dependency policy
 
 Prefer the standard library for stable core behavior. NumPy, PettingZoo, and
-Gymnasium belong in `flip7.envs`. Add PyTorch when learning begins, and
+Gymnasium belong in `flip7.envs`. PyTorch is allowed in learned policies and
+training now that learning begins, and
 Ray/Optuna/tracking/serving libraries only when measured project needs justify
 them.

@@ -12,3 +12,6 @@ Each ADR uses a short Nygard layout:
 
 ADRs do not replace the rules specification or the environment specification.
 They explain why a boundary exists so later phases do not silently reopen it.
+
+Phase 5 training decisions are recorded in
+[`0007-custom-pytorch-ppo.md`](0007-custom-pytorch-ppo.md).

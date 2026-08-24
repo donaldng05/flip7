@@ -107,6 +107,13 @@ score, round score, bust rate, Flip 7 frequency, and action distributions.
 
 **Deliverable:** First competitive RL policy.
 
+Phase 5 uses a custom PyTorch PPO actor-critic with masked discrete actions,
+the Gymnasium learner-seat wrapper, frozen Phase 4 baseline opponents,
+reproducible checkpoints, and JSON training/evaluation artifacts. Self-play,
+recurrent policies, and vectorized training remain deferred.
+The initial bounded run is documented in
+[`phase-5-initial-rl.md`](phase-5-initial-rl.md).
+
 ---
 
 ### Phase 6 — State & Information Experiments
