@@ -15,5 +15,5 @@ alwaysApply: false
 - Add tests before implementing behavior and keep the smallest useful change.
 - Read `docs/engineering-standards.md` and `CONTRIBUTING.md` when conventions
   are unclear.
-- Do not add NumPy, RL, distributed-training, tracking, or serving dependencies
+- Do not add PyTorch, distributed-training, tracking, or serving dependencies
   without a concrete roadmap need and recorded rationale.

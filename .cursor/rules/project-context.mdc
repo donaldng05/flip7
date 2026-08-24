@@ -8,10 +8,11 @@ alwaysApply: true
 - This is a Python research platform for strategic Flip 7 agents, not yet a
   finished game or production service.
 - Read the relevant documents in `docs/` before making architecture decisions:
-  `project-overview.md`, `requirements-and-scope.md`, and `project-plan.md`.
-- The current milestone is repository guidance and engineering infrastructure.
-  The next milestone is the authoritative rules specification.
-- Do not invent or implement game rules until that specification is approved.
+  `project-overview.md`, `requirements-and-scope.md`, `project-plan.md`,
+  `game-rules-specification.md`, `environment-specification.md`, and `adr/`.
+- The current milestone is the Phase 3 RL environment. The next milestone is
+  baseline agents.
+- Do not reimplement game rules in `flip7.envs`; wrap `Flip7Engine`.
 - Keep these package boundaries one-way:
   `core` → `envs` → agents/training/evaluation; `config` is an input boundary.
 - Preserve correctness, reproducibility, modularity, and measurement before

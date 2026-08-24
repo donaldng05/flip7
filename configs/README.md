@@ -7,5 +7,5 @@ Generated checkpoints, logs, metrics, and datasets belong in ignored artifact
 directories or an explicitly configured external store. Use a descriptive run
 name and record the configuration and seed with every future experiment.
 
-`defaults.yaml` contains only foundation settings until the game engine,
-environment, training, and evaluation phases define their own schemas.
+`defaults.yaml` holds shared experiment inputs for the engine and environment
+adapters. Training and evaluation schemas are added when those phases start.
