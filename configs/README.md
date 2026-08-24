@@ -11,3 +11,7 @@ name and record the configuration and seed with every future experiment.
 adapters. Training and evaluation schemas are added when those phases start.
 `baselines.yaml` contains the reproducible Phase 4 agent and tournament
 defaults.
+
+`phase5.yaml` contains the initial PPO architecture, rollout, optimization,
+opponent, and evaluation inputs. Generated checkpoints and results are written
+to ignored artifact directories.

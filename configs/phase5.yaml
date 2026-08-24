@@ -1,0 +1,28 @@
+# Reproducible Phase 5 initial PPO experiment.
+seed: 7
+players: 3
+env:
+  observation: deck_aware
+  reward: sparse_win
+  learner_id: 0
+training:
+  algorithm: ppo
+  device: cpu
+  hidden_size: 128
+  rollout_steps: 256
+  updates: 10
+  epochs: 4
+  minibatch_size: 64
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coefficient: 0.5
+  entropy_coefficient: 0.01
+  max_grad_norm: 0.5
+opponents:
+  training: [random, threshold, risk, ev, dp]
+evaluation:
+  seeds: [700, 701, 702]
+  games_per_matchup: 3
+  held_out: [ev, dp]
