@@ -37,6 +37,6 @@ Conventional Commit-style prefixes such as `feat:`, `fix:`, `test:`, `docs:`,
 
 ## Current milestone
 
-The current milestone is the Phase 3 RL environment. Keep `flip7.core` free of
-RL framework imports. Do not start baseline agents, training loops, or
-evaluation tournaments unless a change explicitly includes that scope.
+The current milestone is Phase 5 initial RL. Keep `flip7.core` free of RL
+framework imports. Keep training configuration-driven and do not commit
+generated checkpoints, logs, or experiment results.
