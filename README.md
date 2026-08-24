@@ -5,15 +5,19 @@ agents that play Flip 7 against heuristic, algorithmic, and learned opponents.
 
 ## Status
 
-The repository is currently establishing its engineering foundation. Game rules,
-the simulator, RL environment, agents, training, and evaluation will be added
-in later milestones.
+Phases 0–2 are in place: the engineering foundation, the authoritative rules
+specification, and a deterministic Flip 7 engine. Phase 3 exposes that engine as
+a PettingZoo AEC environment with a Gymnasium vs-opponents wrapper. Baseline
+agents, training, and evaluation remain later milestones.
 
 ## Documentation
 
 - [Project overview](docs/project-overview.md)
 - [Requirements and scope](docs/requirements-and-scope.md)
 - [Project plan](docs/project-plan.md)
+- [Game rules specification](docs/game-rules-specification.md)
+- [Environment specification](docs/environment-specification.md)
+- [Architecture decision records](docs/adr/README.md)
 - [Engineering standards](docs/engineering-standards.md)
 
 ## Development
@@ -38,15 +42,14 @@ for a reproducible environment; see [development environment](docs/development-e
 The package is intentionally split into replaceable boundaries:
 
 - `flip7.core`: deterministic game mechanics and state
-- `flip7.envs`: RL environment adapters
+- `flip7.envs`: PettingZoo and Gymnasium adapters
 - `flip7.agents`: heuristic and learned policies
 - `flip7.training`: training orchestration
 - `flip7.evaluation`: benchmarks and statistical evaluation
 - `flip7.config`: configuration and experiment inputs
 
-The initial dependency set remains small. RL frameworks, distributed execution,
-experiment tracking, and model serving are added only when their roadmap phase
-requires them.
+`flip7.core` does not import NumPy, Gymnasium, or PettingZoo. Those libraries
+are used only by the environment adapters.
 
 ## License
 

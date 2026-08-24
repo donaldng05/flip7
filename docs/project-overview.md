@@ -161,11 +161,11 @@ The project foundation uses a small, reproducible Python stack:
 * **uv** for dependency resolution and lockfiles.
 * **pytest**, **Ruff**, **Pyright**, and **pre-commit** for quality automation.
 * **GitHub Actions** and optional **Docker** for reproducible CI and development.
+* **NumPy**, **Gymnasium**, and **PettingZoo** for the Phase 3 environment
+  adapters.
 
 Later research phases may add:
 
-* **NumPy** for simulation and numerical computation.
-* **PettingZoo / Gymnasium** for RL environment interfaces.
 * **PyTorch** for neural-network policies and training.
 * **PPO / MARL algorithms** for policy learning.
 * **Monte Carlo / dynamic programming** for analytical and algorithmic baselines.

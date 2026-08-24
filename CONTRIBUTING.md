@@ -37,5 +37,6 @@ Conventional Commit-style prefixes such as `feat:`, `fix:`, `test:`, `docs:`,
 
 ## Current milestone
 
-The current milestone establishes project infrastructure. Do not implement Flip
-7 rules or RL behavior until the authoritative rules specification is approved.
+The current milestone is the Phase 3 RL environment. Keep `flip7.core` free of
+RL framework imports. Do not start baseline agents, training loops, or
+evaluation tournaments unless a change explicitly includes that scope.

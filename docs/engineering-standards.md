@@ -2,10 +2,9 @@
 
 ## Scope of this milestone
 
-The repository foundation is implemented before the game-rules specification.
-This milestone establishes repeatable development, quality gates, CI, release
-artifacts, and architecture boundaries; it does not define or implement Flip 7
-behavior.
+The RL environment adapters wrap the approved rules engine. This milestone
+defines observations, actions, masks, rewards, and PettingZoo/Gymnasium
+interfaces; it does not train policies or add baseline agent tournaments.
 
 ## Tooling
 
@@ -44,7 +43,7 @@ metric calculations with small deterministic fixtures.
 
 ## Dependency policy
 
-Prefer the standard library for stable core behavior. Add NumPy when simulation
-needs numerical arrays, PettingZoo/Gymnasium when the environment adapter is
-implemented, PyTorch when learning begins, and Ray/Optuna/tracking/serving
-libraries only when measured project needs justify them.
+Prefer the standard library for stable core behavior. NumPy, PettingZoo, and
+Gymnasium belong in `flip7.envs`. Add PyTorch when learning begins, and
+Ray/Optuna/tracking/serving libraries only when measured project needs justify
+them.

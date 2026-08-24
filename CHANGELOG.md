@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 - Establish the reproducible project foundation.
+- Specify Flip 7 rules and implement the deterministic core engine.
+- Expose the engine as a PettingZoo AEC environment with a Gymnasium wrapper.
 
 ## Release policy
 

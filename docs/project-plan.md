@@ -65,7 +65,9 @@ CI validation, and reproducible package builds.
 * Support multi-agent interaction.
 * Validate environment transitions.
 
-**Deliverable:** PettingZoo/Gymnasium-compatible environment.
+**Deliverable:** A PettingZoo AEC environment wrapping the core engine, plus a
+Gymnasium vs-opponents wrapper. Layouts are defined in
+`environment-specification.md` and ADRs `0001`–`0005`.
 
 ---
 

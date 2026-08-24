@@ -17,4 +17,4 @@
 - Random seeds/configuration changes: none / described below
 - New dependencies: none / described below
 - GPU, cloud credentials, or external services required: no / described below
-- This change avoids implementing game rules or RL behavior unless explicitly scoped.
+- This change stays within the current milestone unless the summary says otherwise.
