@@ -2,9 +2,8 @@
 
 ## Scope of this milestone
 
-The RL environment adapters wrap the approved rules engine. This milestone
-defines observations, actions, masks, rewards, and PettingZoo/Gymnasium
-interfaces; it does not train policies or add baseline agent tournaments.
+Phase 4 extends the approved RL environment with observation-only baseline
+policies and reproducible AEC evaluation. It does not train learned policies.
 
 ## Tooling
 

@@ -9,3 +9,5 @@ name and record the configuration and seed with every future experiment.
 
 `defaults.yaml` holds shared experiment inputs for the engine and environment
 adapters. Training and evaluation schemas are added when those phases start.
+`baselines.yaml` contains the reproducible Phase 4 agent and tournament
+defaults.
