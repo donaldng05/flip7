@@ -14,6 +14,17 @@ def test_load_config_reads_yaml_mapping(tmp_path: Path) -> None:
     assert load_config(path) == {"seed": 7, "players": 4}
 
 
+def test_defaults_config_uses_baseline_player_count() -> None:
+    config = load_config(Path("configs/defaults.yaml"))
+
+    assert config["players"] == 3
+    assert config["env"] == {
+        "observation": "competitive",
+        "reward": "sparse_win",
+        "learner_id": 0,
+    }
+
+
 def test_load_config_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "missing.yaml")
