@@ -18,6 +18,6 @@ Skills under `skills/<skill-name>/SKILL.md` are explicit workflows. They are
 not automatically invoked by default. Each skill may link to a one-level-deep
 reference file for detailed checklists or templates.
 
-Update this guidance when the project moves from environment adapters to
-training or evaluation work. Keep it consistent with
+This repository now includes baseline-agent and evaluation work; update this
+guidance as the project moves into learned training. Keep it consistent with
 `docs/engineering-standards.md` and `CONTRIBUTING.md`.

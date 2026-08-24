@@ -1,0 +1,17 @@
+# Reproducible Phase 4 baseline defaults.
+seed: 7
+games_per_matchup: 100
+player_counts: [3, 4]
+observation: deck_aware
+reward: sparse_win
+agents:
+  fixed_threshold:
+    threshold: 15.0
+  bust_probability:
+    risk_tolerance: 0.20
+    min_value: 0.0
+  expected_value:
+    bust_penalty: 0.0
+    win_pressure: 0.0
+  round_dp:
+    max_unique_numbers: 7

@@ -87,6 +87,12 @@ Evaluate baseline strength through repeated tournaments.
 
 **Deliverable:** Baseline agent suite and benchmark results.
 
+Phase 4 uses an observation-only callable policy interface. The initial suite
+contains random-legal, fixed-threshold, bust-probability, expected-value, and
+bounded round-level dynamic-programming agents. Evaluation runs through the
+PettingZoo AEC environment with fixed seeds and reports win share, ties, final
+score, round score, bust rate, Flip 7 frequency, and action distributions.
+
 ---
 
 ### Phase 5 — Initial RL Agent
