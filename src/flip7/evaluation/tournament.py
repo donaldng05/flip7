@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from flip7.agents import ActionMask, AgentFactory, Observation
 from flip7.envs import Flip7AECEnv, ObservationFamily, RewardMode, agent_name
+from flip7.envs.observations import encode_observation
 from flip7.evaluation.metrics import GameResult, MatchupMetrics
 
 type LastResult = tuple[
@@ -26,10 +27,16 @@ def run_game(
     seed: int,
     observation: ObservationFamily = ObservationFamily.DECK_AWARE,
     reward: RewardMode = RewardMode.SPARSE_WIN,
+    agent_observations: Sequence[ObservationFamily] | None = None,
 ) -> GameResult:
     """Run one seeded complete game for the supplied seat lineup."""
     player_count = len(factories)
-    env = Flip7AECEnv(player_count, observation=observation, reward=reward)
+    if agent_observations is not None and len(agent_observations) != player_count:
+        raise ValueError("agent_observations must match the lineup length")
+    env_observation = (
+        ObservationFamily.DECK_AWARE if agent_observations is not None else observation
+    )
+    env = Flip7AECEnv(player_count, observation=env_observation, reward=reward)
     policies = {agent_name(seat): factory() for seat, factory in enumerate(factories)}
     env.reset(seed=seed)
     action_counts = [{"hit": 0, "stay": 0, "target": 0} for _ in range(player_count)]
@@ -48,6 +55,12 @@ def run_game(
         if observation_value is None:
             raise RuntimeError("active AEC agent has no observation")
         seat = int(env.agent_selection.rsplit("_", 1)[1])
+        if agent_observations is not None:
+            observation_value = encode_observation(
+                env.engine.state,
+                seat,
+                agent_observations[seat],
+            )
         action = policies[env.agent_selection](observation_value, info["action_mask"])
         if action == 0:
             action_counts[seat]["hit"] += 1
@@ -92,6 +105,7 @@ def run_matchup(
     seed: int = 7,
     player_count: int | None = None,
     observation: ObservationFamily = ObservationFamily.DECK_AWARE,
+    agent_observations: Sequence[ObservationFamily] | None = None,
 ) -> MatchupMetrics:
     """Run repeated games for one explicit seat lineup."""
     if len(names) < 3:
@@ -100,13 +114,20 @@ def run_matchup(
         raise ValueError("player_count must match the lineup length")
     if games < 1:
         raise ValueError("games must be positive")
+    if agent_observations is not None and len(agent_observations) != len(names):
+        raise ValueError("agent_observations must match the lineup length")
     missing = set(names) - set(roster)
     if missing:
         raise ValueError(f"roster is missing agents: {sorted(missing)}")
     metrics = MatchupMetrics(tuple(names), len(names))
     for game_index in range(games):
         factories = tuple(roster[name] for name in names)
-        result = run_game(factories, seed=seed + game_index, observation=observation)
+        result = run_game(
+            factories,
+            seed=seed + game_index,
+            observation=observation,
+            agent_observations=agent_observations,
+        )
         result = GameResult(
             agents=tuple(names),
             player_count=result.player_count,
