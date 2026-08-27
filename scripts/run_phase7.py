@@ -20,6 +20,7 @@ from flip7.evaluation import (
     run_rotated_matchups,
     run_round_robin,
     summarize_rotated_results,
+    validate_artifact_manifest,
     write_tournament,
 )
 from flip7.evaluation.phase7 import TournamentParticipant
@@ -32,15 +33,6 @@ from flip7.training import (
     baseline_factories,
     write_history,
     write_population,
-)
-
-MANIFEST_PATH_KEYS = (
-    "checkpoint",
-    "training_history",
-    "population",
-    "evaluation",
-    "tournament",
-    "manifest",
 )
 
 
@@ -127,14 +119,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def validate_artifact_manifest(manifest: Mapping[str, object]) -> None:
-    """Reject an incomplete manifest before reporting a run as complete."""
-    for key in MANIFEST_PATH_KEYS:
-        value = manifest.get(key)
-        if not isinstance(value, str) or not Path(value).is_file():
-            raise ValueError(f"artifact manifest is missing a file for {key}")
 
 
 def _rating(result: Mapping[str, object], name: str) -> float | None:

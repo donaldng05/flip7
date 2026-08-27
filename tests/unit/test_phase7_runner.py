@@ -3,7 +3,8 @@
 from pathlib import Path
 
 import pytest
-from scripts.run_phase7 import MANIFEST_PATH_KEYS, validate_artifact_manifest
+
+from flip7.evaluation import MANIFEST_PATH_KEYS, validate_artifact_manifest
 
 
 def test_phase7_artifact_manifest_requires_all_run_files(tmp_path: Path) -> None:

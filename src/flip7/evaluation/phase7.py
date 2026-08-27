@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +19,23 @@ from flip7.agents import (
 from flip7.envs import ObservationFamily, RewardMode
 from flip7.evaluation.metrics import GameResult, MatchupMetrics
 from flip7.evaluation.tournament import run_game
+
+MANIFEST_PATH_KEYS = (
+    "checkpoint",
+    "training_history",
+    "population",
+    "evaluation",
+    "tournament",
+    "manifest",
+)
+
+
+def validate_artifact_manifest(manifest: Mapping[str, object]) -> None:
+    """Reject an incomplete manifest before reporting a run as complete."""
+    for key in MANIFEST_PATH_KEYS:
+        value = manifest.get(key)
+        if not isinstance(value, str) or not Path(value).is_file():
+            raise ValueError(f"artifact manifest is missing a file for {key}")
 
 
 @dataclass(frozen=True, slots=True)
