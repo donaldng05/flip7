@@ -159,6 +159,13 @@ shaping remain deferred until this controlled comparison is complete.
 
 **Deliverable:** Robust competitive RL agent.
 
+Phase 7 begins with league PPO: a randomized-seat active policy trains against
+frozen historical policy snapshots and diverse Phase 4 baselines. The initial
+experiment compares a Phase 6 control, a mixed snapshot league, and a
+latest-snapshot ablation using held-out opponent variants and seat-rotated
+tournaments with Elo. MAPPO remains evidence-gated until centralized-critic
+credit assignment is justified by the league results.
+
 ---
 
 ### Phase 8 — Robustness & Generalization

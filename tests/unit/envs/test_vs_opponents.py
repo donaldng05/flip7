@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 from flip7.core.cards import Card, NumberCard
-from flip7.envs.encodings import STAY_INDEX, agent_name
+from flip7.envs.encodings import HIT_INDEX, STAY_INDEX, agent_name
+from flip7.envs.observations import ObservationFamily
 from flip7.envs.vs_opponents import Flip7VsOpponentsEnv, RandomLegalPolicy
 
 
@@ -109,3 +110,42 @@ def test_wrapper_unique_win_reward_reaches_the_learner() -> None:
     assert terminated is True
     assert reward == 1.0
     del info
+
+
+def test_wrapper_supports_per_seat_opponent_observations() -> None:
+    seen: dict[str, tuple[int, ...]] = {}
+
+    def record_basic(observation: np.ndarray, _mask: np.ndarray) -> int:
+        seen["basic"] = observation.shape
+        return STAY_INDEX
+
+    def record_deck_aware(observation: np.ndarray, _mask: np.ndarray) -> int:
+        seen["deck_aware"] = observation.shape
+        return STAY_INDEX
+
+    env = Flip7VsOpponentsEnv(
+        player_count=3,
+        learner_id=0,
+        observation=ObservationFamily.BASIC,
+        opponent_observations={
+            agent_name(1): ObservationFamily.BASIC,
+            agent_name(2): ObservationFamily.DECK_AWARE,
+        },
+        opponents={
+            agent_name(1): record_basic,
+            agent_name(2): record_deck_aware,
+        },
+    )
+    env.reset(seed=0)
+    env.step(HIT_INDEX)
+
+    assert seen == {"basic": (33,), "deck_aware": (120,)}
+
+
+def test_wrapper_rejects_incomplete_per_seat_observation_map() -> None:
+    with pytest.raises(ValueError, match="opponent_observations must include"):
+        Flip7VsOpponentsEnv(
+            player_count=3,
+            learner_id=0,
+            opponent_observations={agent_name(1): ObservationFamily.BASIC},
+        )

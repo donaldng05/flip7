@@ -48,6 +48,7 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
         learner_id: int = 0,
         observation: ObservationFamily | str = ObservationFamily.COMPETITIVE,
         opponent_observation: ObservationFamily | str | None = None,
+        opponent_observations: Mapping[str, ObservationFamily | str] | None = None,
         reward: RewardMode | str = RewardMode.SPARSE_WIN,
         opponents: Mapping[str, Opponent] | None = None,
     ) -> None:
@@ -62,6 +63,16 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
         self._opponent_observation = ObservationFamily(
             observation if opponent_observation is None else opponent_observation
         )
+        self._opponent_observations = (
+            {
+                agent: ObservationFamily(family)
+                for agent, family in opponent_observations.items()
+            }
+            if opponent_observations is not None
+            else None
+        )
+        if self._opponent_observations is not None:
+            self._validate_opponent_observations(self._opponent_observations)
         self._supplied_opponents = dict(opponents) if opponents is not None else None
         self._opponents: dict[str, Opponent] = {}
         if self._supplied_opponents is not None:
@@ -122,7 +133,7 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
             observation = encode_observation(
                 self._aec.engine.state,
                 player_id_from_agent(agent),
-                self._opponent_observation,
+                self._observation_for_opponent(agent),
             )
             action = self._opponents[agent](observation, info["action_mask"])
             self._aec.step(action)
@@ -157,4 +168,24 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
         }
         if set(opponents) != expected:
             msg = "opponents must include every seated player except the learner"
+            raise ValueError(msg)
+
+    def _observation_for_opponent(self, agent: str) -> ObservationFamily:
+        if self._opponent_observations is None:
+            return self._opponent_observation
+        return self._opponent_observations[agent]
+
+    def _validate_opponent_observations(
+        self, opponent_observations: Mapping[str, ObservationFamily]
+    ) -> None:
+        expected = {
+            agent_name(player_id)
+            for player_id in range(self.player_count)
+            if player_id != self.learner_id
+        }
+        if set(opponent_observations) != expected:
+            msg = (
+                "opponent_observations must include every seated player "
+                "except the learner"
+            )
             raise ValueError(msg)

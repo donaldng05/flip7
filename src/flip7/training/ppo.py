@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +18,7 @@ from torch.distributions import Categorical
 from flip7 import __version__
 from flip7.agents import (
     ActorCritic,
+    Agent,
     AgentFactory,
     BustProbabilityAgent,
     ExpectedValueAgent,
@@ -66,6 +68,18 @@ class Rollout:
     next_value: float
 
 
+@dataclass(frozen=True, slots=True)
+class EpisodeLineup:
+    """Policies and observation families for one learner episode."""
+
+    learner_id: int
+    opponents: Mapping[str, Agent]
+    opponent_observations: Mapping[str, ObservationFamily]
+
+
+type OpponentProvider = Callable[[random.Random, int], EpisodeLineup]
+
+
 def compute_gae(
     rewards: NDArray[np.float32],
     dones: NDArray[np.bool_],
@@ -86,10 +100,10 @@ def compute_gae(
     return advantages, advantages + values
 
 
-def baseline_factories() -> dict[str, AgentFactory]:
+def baseline_factories(*, random_seed: int = 101) -> dict[str, AgentFactory]:
     """Return fresh Phase 4 baseline policies for PPO opponent sampling."""
     return {
-        "random": lambda: RandomLegalAgent(seed=101),
+        "random": lambda: RandomLegalAgent(seed=random_seed),
         "threshold": lambda: FixedThresholdAgent(threshold=15.0),
         "risk": lambda: BustProbabilityAgent(risk_tolerance=0.20),
         "ev": lambda: ExpectedValueAgent(),
@@ -105,6 +119,7 @@ class PPOTrainer:
         config: PPOConfig,
         *,
         opponent_names: tuple[str, ...] = ("random", "threshold", "risk", "ev", "dp"),
+        opponent_provider: OpponentProvider | None = None,
     ) -> None:
         if config.player_count < 3:
             raise ValueError("PPO requires at least three players")
@@ -121,6 +136,7 @@ class PPOTrainer:
         self.config = config
         self.opponent_names = opponent_names
         self._factories = available
+        self._opponent_provider = opponent_provider or self._default_opponent_provider
         seed_torch(config.seed)
         self._rng = random.Random(config.seed)
         initial_env = self.new_env()
@@ -136,27 +152,41 @@ class PPOTrainer:
         self.optimizer = optim.Adam(self.network.parameters(), lr=config.learning_rate)
 
     def new_env(self) -> Flip7VsOpponentsEnv:
-        opponent_name = self._rng.choice(self.opponent_names)
-        policy_factory = self._factories[opponent_name]
-        learner_id = self._learner_id_for_episode()
-        opponents = {
-            agent_name(seat): policy_factory()
-            for seat in range(self.config.player_count)
-            if seat != learner_id
-        }
+        lineup = self._opponent_provider(self._rng, self.config.player_count)
+        if not 0 <= lineup.learner_id < self.config.player_count:
+            raise ValueError("opponent provider returned an invalid learner seat")
         return Flip7VsOpponentsEnv(
             self.config.player_count,
-            learner_id=learner_id,
+            learner_id=lineup.learner_id,
             observation=ObservationFamily(self.config.observation),
-            opponent_observation=ObservationFamily.DECK_AWARE,
+            opponent_observations=lineup.opponent_observations,
             reward=RewardMode(self.config.reward),
-            opponents=opponents,
+            opponents=lineup.opponents,
         )
 
-    def _learner_id_for_episode(self) -> int:
+    def _default_opponent_provider(
+        self, rng: random.Random, player_count: int
+    ) -> EpisodeLineup:
+        opponent_name = rng.choice(self.opponent_names)
+        policy_factory = self._factories[opponent_name]
+        learner_id = self._learner_id_for_episode(rng)
+        opponents = {
+            agent_name(seat): policy_factory()
+            for seat in range(player_count)
+            if seat != learner_id
+        }
+        opponent_observations = {
+            agent_name(seat): ObservationFamily.DECK_AWARE
+            for seat in range(player_count)
+            if seat != learner_id
+        }
+        return EpisodeLineup(learner_id, opponents, opponent_observations)
+
+    def _learner_id_for_episode(self, rng: random.Random | None = None) -> int:
+        source = self._rng if rng is None else rng
         if self.config.learner_seat_mode == "fixed":
             return self.config.learner_id
-        return self._rng.randrange(self.config.player_count)
+        return source.randrange(self.config.player_count)
 
     def collect_rollout(self) -> Rollout:
         observations: list[NDArray[np.float32]] = []
@@ -280,24 +310,30 @@ class PPOTrainer:
             key: value / count for key, value in totals.items() if key != "updates"
         } | {"updates": totals["updates"]}
 
-    def save_checkpoint(self, path: Path, update: int) -> None:
+    def save_checkpoint(
+        self,
+        path: Path,
+        update: int,
+        *,
+        metadata: Mapping[str, object] | None = None,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         config = asdict(self.config) | {
             "observation_size": self.observation_size,
             "action_size": self.action_size,
         }
-        torch.save(
-            {
-                "model_state": self.network.state_dict(),
-                "optimizer_state": self.optimizer.state_dict(),
-                "update": update,
-                "config": config,
-                "opponent_names": self.opponent_names,
-                "seed": self.config.seed,
-                "package_version": __version__,
-            },
-            path,
-        )
+        payload: dict[str, object] = {
+            "model_state": self.network.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "update": update,
+            "config": config,
+            "opponent_names": self.opponent_names,
+            "seed": self.config.seed,
+            "package_version": __version__,
+        }
+        if metadata is not None:
+            payload["metadata"] = dict(metadata)
+        torch.save(payload, path)
 
     def load_checkpoint(self, path: Path) -> int:
         """Restore model and optimizer state, returning the saved update."""
@@ -333,4 +369,13 @@ def write_history(path: Path, history: list[dict[str, float]]) -> None:
     path.write_text(json.dumps({"updates": history}, indent=2) + "\n", encoding="utf-8")
 
 
-__all__ = ["PPOConfig", "PPOTrainer", "Rollout", "compute_gae", "write_history"]
+__all__ = [
+    "EpisodeLineup",
+    "OpponentProvider",
+    "PPOConfig",
+    "PPOTrainer",
+    "Rollout",
+    "baseline_factories",
+    "compute_gae",
+    "write_history",
+]

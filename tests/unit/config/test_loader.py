@@ -45,6 +45,20 @@ def test_phase6_config_declares_the_six_condition_matrix() -> None:
     ]
 
 
+def test_phase7_config_declares_control_and_population_conditions() -> None:
+    config = load_config(Path("configs/phase7.yaml"))
+    conditions = cast(list[object], config["conditions"])
+    typed_conditions = [
+        cast(Mapping[str, object], condition) for condition in conditions
+    ]
+
+    assert [condition["name"] for condition in typed_conditions] == [
+        "baseline_control",
+        "league_mixed",
+        "latest_only",
+    ]
+
+
 def test_load_config_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "missing.yaml")

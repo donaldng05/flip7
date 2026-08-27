@@ -19,3 +19,7 @@ to ignored artifact directories.
 `phase6.yaml` contains the six-condition observation and learner-seat matrix.
 Use `scripts/run_phase6.py` to train, evaluate, and summarize the matrix under
 `artifacts/phase6/`.
+
+`phase7.yaml` contains the baseline control, mixed policy league, latest-only
+ablation, held-out evaluation, and Elo tournament inputs. Use
+`scripts/run_phase7.py` to write the experiment under `artifacts/phase7/`.
