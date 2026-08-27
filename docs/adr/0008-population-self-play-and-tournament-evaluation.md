@@ -37,4 +37,3 @@ historical snapshot sampling cannot address.
   measurable rather than anecdotal.
 - The approach does not yet solve simultaneous multi-agent credit assignment;
   that complexity remains an evidence-gated follow-up.
-
