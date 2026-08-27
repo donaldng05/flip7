@@ -3,6 +3,8 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
+import torch
 
 from flip7.training import PPOConfig, PPOTrainer, compute_gae
 
@@ -40,6 +42,8 @@ def test_bounded_ppo_update_and_checkpoint_round_trip(tmp_path: Path) -> None:
     assert len(history) == 1
     assert all(np.isfinite(value) for value in history[0].values())
     assert checkpoint.exists()
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert payload["config"]["learner_seat_mode"] == "fixed"
 
     restored_trainer = PPOTrainer(_small_config(), opponent_names=("random",))
     assert restored_trainer.load_checkpoint(checkpoint) == 1
@@ -64,3 +68,67 @@ def test_bounded_ppo_update_and_checkpoint_round_trip(tmp_path: Path) -> None:
         seed=29,
     )
     assert metrics.games == 1
+
+
+def test_fixed_learner_seat_mode_uses_configured_seat() -> None:
+    trainer = PPOTrainer(
+        PPOConfig(seed=3, learner_id=2, learner_seat_mode="fixed"),
+        opponent_names=("random",),
+    )
+
+    assert trainer.new_env().learner_id == 2
+
+
+def test_random_learner_seat_mode_is_reproducible_and_covers_all_seats() -> None:
+    config = PPOConfig(seed=23, learner_seat_mode="random")
+    first = PPOTrainer(config, opponent_names=("random",))
+    second = PPOTrainer(config, opponent_names=("random",))
+
+    first_ids = [first.new_env().learner_id for _ in range(32)]
+    second_ids = [second.new_env().learner_id for _ in range(32)]
+
+    assert first_ids == second_ids
+    assert set(first_ids) == {0, 1, 2}
+
+
+@pytest.mark.parametrize(
+    ("observation", "size"),
+    [("basic", 33), ("competitive", 96), ("deck_aware", 120)],
+)
+def test_ppo_supports_each_phase6_observation_family(
+    observation: str, size: int
+) -> None:
+    trainer = PPOTrainer(
+        PPOConfig(seed=5, observation=observation),
+        opponent_names=("random",),
+    )
+
+    assert trainer.observation_size == size
+
+
+def test_ppo_rejects_unknown_learner_seat_mode() -> None:
+    with pytest.raises(ValueError, match="learner_seat_mode"):
+        PPOTrainer(PPOConfig(learner_seat_mode="rotated"), opponent_names=("random",))
+
+
+def test_basic_observation_can_train_against_deck_aware_baselines(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "basic.pt"
+    trainer = PPOTrainer(
+        PPOConfig(
+            seed=29,
+            observation="basic",
+            rollout_steps=8,
+            updates=1,
+            epochs=1,
+            minibatch_size=4,
+            hidden_size=16,
+        )
+    )
+
+    history = trainer.train(checkpoint)
+
+    assert checkpoint.exists()
+    assert len(history) == 1
+    assert all(np.isfinite(value) for value in history[0].values())

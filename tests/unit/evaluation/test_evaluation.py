@@ -1,7 +1,19 @@
 """Tests for baseline metric aggregation and seeded tournament execution."""
 
+from collections.abc import Mapping
+from typing import cast
+
 from flip7.agents import FixedThresholdAgent, RandomLegalAgent
-from flip7.evaluation import GameResult, MatchupMetrics, run_matchup
+from flip7.envs import ObservationFamily
+from flip7.evaluation import (
+    PHASE6_MATCHUPS,
+    GameResult,
+    MatchupMetrics,
+    run_matchup,
+    run_rotated_matchups,
+    summarize_rotated_results,
+)
+from flip7.training import baseline_factories
 
 
 def test_matchup_metrics_split_tied_win_share() -> None:
@@ -38,3 +50,50 @@ def test_seeded_smoke_matchup_is_reproducible() -> None:
     second = run_matchup(("random", "threshold", "random"), roster, games=1, seed=19)
     assert first.as_dict() == second.as_dict()
     assert first.games == 1
+
+
+def test_rotated_matchups_cover_every_learner_seat_reproducibly() -> None:
+    def learner() -> RandomLegalAgent:
+        return RandomLegalAgent(seed=31)
+
+    first = run_rotated_matchups(
+        learner,
+        baseline_factories(),
+        games=1,
+        seed_bases=(100, 200, 300),
+        observation=ObservationFamily.BASIC,
+    )
+    second = run_rotated_matchups(
+        learner,
+        baseline_factories(),
+        games=1,
+        seed_bases=(100, 200, 300),
+        observation=ObservationFamily.BASIC,
+    )
+
+    assert len(first) == len(PHASE6_MATCHUPS) * 3
+    assert [result.as_dict() for result in first] == [
+        result.as_dict() for result in second
+    ]
+    assert [result.agents.index("ppo") for result in first] == [
+        0,
+        1,
+        2,
+        0,
+        1,
+        2,
+        0,
+        1,
+        2,
+    ]
+    summary = summarize_rotated_results(first)
+    per_seat = cast(Mapping[str, object], summary["per_seat"])
+    assert set(per_seat) == {"0", "1", "2"}
+    per_matchup = cast(Mapping[str, object], summary["per_matchup"])
+    assert set(per_matchup) == {
+        "random/threshold",
+        "risk/ev",
+        "dp/threshold",
+    }
+    seat_spread = cast(float, summary["seat_spread"])
+    assert 0.0 <= seat_spread <= 1.0

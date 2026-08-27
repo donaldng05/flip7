@@ -1,6 +1,8 @@
 """Tests for experiment configuration loading."""
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -23,6 +25,24 @@ def test_defaults_config_uses_baseline_player_count() -> None:
         "reward": "sparse_win",
         "learner_id": 0,
     }
+
+
+def test_phase6_config_declares_the_six_condition_matrix() -> None:
+    config = load_config(Path("configs/phase6.yaml"))
+    conditions = cast(list[object], config["conditions"])
+
+    assert isinstance(conditions, list)
+    typed_conditions = [
+        cast(Mapping[str, object], condition) for condition in conditions
+    ]
+    assert [condition["name"] for condition in typed_conditions] == [
+        "basic_fixed",
+        "basic_random",
+        "competitive_fixed",
+        "competitive_random",
+        "deck_aware_fixed",
+        "deck_aware_random",
+    ]
 
 
 def test_load_config_rejects_missing_file(tmp_path: Path) -> None:

@@ -12,8 +12,8 @@ from gymnasium import spaces
 from numpy.typing import NDArray
 
 from flip7.envs.aec import Flip7AECEnv
-from flip7.envs.encodings import action_space_size, agent_name
-from flip7.envs.observations import ObservationFamily
+from flip7.envs.encodings import action_space_size, agent_name, player_id_from_agent
+from flip7.envs.observations import ObservationFamily, encode_observation
 from flip7.envs.rewards import RewardMode
 
 type ActionMask = NDArray[np.int8]
@@ -47,6 +47,7 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
         *,
         learner_id: int = 0,
         observation: ObservationFamily | str = ObservationFamily.COMPETITIVE,
+        opponent_observation: ObservationFamily | str | None = None,
         reward: RewardMode | str = RewardMode.SPARSE_WIN,
         opponents: Mapping[str, Opponent] | None = None,
     ) -> None:
@@ -58,6 +59,9 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
         self.player_count = player_count
         self.learner_id = learner_id
         self.learner_agent = agent_name(learner_id)
+        self._opponent_observation = ObservationFamily(
+            observation if opponent_observation is None else opponent_observation
+        )
         self._supplied_opponents = dict(opponents) if opponents is not None else None
         self._opponents: dict[str, Opponent] = {}
         if self._supplied_opponents is not None:
@@ -113,13 +117,14 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
             not self._aec.engine.state.is_game_terminal
             and self._aec.agent_selection != self.learner_agent
         ):
-            observation, _, _, _, info = self._aec.last()
-            if observation is None:
-                msg = "opponent observation is missing"
-                raise RuntimeError(msg)
-            action = self._opponents[self._aec.agent_selection](
-                observation, info["action_mask"]
+            agent = self._aec.agent_selection
+            _observation, _, _, _, info = self._aec.last()
+            observation = encode_observation(
+                self._aec.engine.state,
+                player_id_from_agent(agent),
+                self._opponent_observation,
             )
+            action = self._opponents[agent](observation, info["action_mask"])
             self._aec.step(action)
             reward += float(self._aec.rewards.get(self.learner_agent, 0.0))
         return reward

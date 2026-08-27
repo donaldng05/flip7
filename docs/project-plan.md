@@ -138,6 +138,12 @@ Measure the effect of each representation on performance.
 
 **Deliverable:** State-representation ablation study.
 
+The Phase 6 implementation uses the six-condition matrix documented in
+[`phase-6-state-info-experiments.md`](phase-6-state-info-experiments.md):
+`basic`, `competitive`, and `deck_aware` observations with fixed or randomized
+learner seating. Historical observations, recurrent policies, and reward
+shaping remain deferred until this controlled comparison is complete.
+
 ---
 
 ### Phase 7 — Self-Play & Multi-Agent Learning
