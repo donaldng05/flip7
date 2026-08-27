@@ -15,3 +15,7 @@ defaults.
 `phase5.yaml` contains the initial PPO architecture, rollout, optimization,
 opponent, and evaluation inputs. Generated checkpoints and results are written
 to ignored artifact directories.
+
+`phase6.yaml` contains the six-condition observation and learner-seat matrix.
+Use `scripts/run_phase6.py` to train, evaluate, and summarize the matrix under
+`artifacts/phase6/`.
