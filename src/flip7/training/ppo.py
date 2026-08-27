@@ -36,6 +36,7 @@ class PPOConfig:
     seed: int = 7
     player_count: int = 3
     learner_id: int = 0
+    learner_seat_mode: str = "fixed"
     observation: str = "deck_aware"
     reward: str = "sparse_win"
     hidden_size: int = 128
@@ -107,6 +108,10 @@ class PPOTrainer:
     ) -> None:
         if config.player_count < 3:
             raise ValueError("PPO requires at least three players")
+        if not 0 <= config.learner_id < config.player_count:
+            raise ValueError("learner_id must reference a seated player")
+        if config.learner_seat_mode not in {"fixed", "random"}:
+            raise ValueError("learner_seat_mode must be 'fixed' or 'random'")
         if not opponent_names:
             raise ValueError("at least one opponent is required")
         available = baseline_factories()
@@ -133,18 +138,25 @@ class PPOTrainer:
     def new_env(self) -> Flip7VsOpponentsEnv:
         opponent_name = self._rng.choice(self.opponent_names)
         policy_factory = self._factories[opponent_name]
+        learner_id = self._learner_id_for_episode()
         opponents = {
             agent_name(seat): policy_factory()
             for seat in range(self.config.player_count)
-            if seat != self.config.learner_id
+            if seat != learner_id
         }
         return Flip7VsOpponentsEnv(
             self.config.player_count,
-            learner_id=self.config.learner_id,
+            learner_id=learner_id,
             observation=ObservationFamily(self.config.observation),
+            opponent_observation=ObservationFamily.DECK_AWARE,
             reward=RewardMode(self.config.reward),
             opponents=opponents,
         )
+
+    def _learner_id_for_episode(self) -> int:
+        if self.config.learner_seat_mode == "fixed":
+            return self.config.learner_id
+        return self._rng.randrange(self.config.player_count)
 
     def collect_rollout(self) -> Rollout:
         observations: list[NDArray[np.float32]] = []
