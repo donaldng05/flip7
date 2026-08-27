@@ -2,10 +2,10 @@
 
 ## Status
 
-The initial Phase 5 implementation and bounded pipeline smoke run are
-complete. The first short policy is not yet a competitive result; it verifies
-that PPO training, masked actions, checkpointing, and baseline evaluation work
-end to end.
+The Phase 5 implementation and bounded pipeline smoke run are complete. The
+training pipeline works end to end: PPO updates, masked actions, checkpointing,
+checkpoint restoration, and baseline evaluation all pass. The policy is not
+yet a seat-robust competitive result.
 
 ## Implementation
 
@@ -42,3 +42,31 @@ indicating that substantially more training, reward/credit-assignment work,
 or hyperparameter experimentation is needed before calling it competitive.
 Those experiments are follow-up work, not evidence that the Phase 5 pipeline
 is broken.
+
+## Extended diagnostic run
+
+Before Phase 6, three independent longer runs used seeds `7`, `17`, and `27`,
+with 50 updates and 1,024 rollout steps per update (51,200 learner decisions
+per seed). The policies learned to choose `stay` rather than selecting `hit`
+exclusively.
+
+With PPO fixed in player ID 0 and evaluated for 300 games per matchup, average
+PPO win shares across the three seeds were:
+
+| Matchup | PPO win share |
+| --- | ---: |
+| PPO / random / threshold | 66.2% |
+| PPO / risk / expected-value | 46.4% |
+| PPO / DP / threshold | 65.6% |
+
+Those numbers are strongly position-dependent. In a paired seat-rotated
+evaluation covering 2,700 games, PPO's pooled win shares were 36.8% against
+random/threshold, 28.1% against risk/expected-value, and 36.3% against
+DP/threshold. The risk and threshold baselines won 71.1% and 58.5–62.9% in
+the corresponding rotated matchups. PPO's aggregate rotated seat spread was
+approximately 40.4 percentage points.
+
+The conclusion is qualitative rather than algorithmic: Phase 5 learning is
+real, but the policy exploits favorable first-player conditions and remains
+too bust-prone in later seats. Phase 6 therefore tests observation families
+and randomized learner seating.
