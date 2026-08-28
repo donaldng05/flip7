@@ -28,3 +28,9 @@ ablation, held-out evaluation, and Elo tournament inputs. Use
 confirmation, and evidence-gated MAPPO pilot. Use
 `scripts/run_phase7_follow_up.py`; its outputs are isolated under
 `artifacts/phase7-follow-up/`.
+
+`phase7-follow-up-stability.yaml` contains the seat-balanced PPO recipe,
+response-diverse retention comparison, paired held-out evaluation, focused
+adaptation tournament, and gated MAPPO stage. Use
+`scripts/run_phase7_follow_up_stability.py`; outputs are isolated under
+`artifacts/phase7-follow-up-stability/`.

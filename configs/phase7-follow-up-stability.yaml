@@ -1,0 +1,118 @@
+# Phase 7 follow-up: seat stability, response diversity, and adaptation.
+experiment: phase7-follow-up-stability
+players: 3
+env:
+  observation: basic
+  reward: sparse_win
+  learner_id: 0
+  learner_seat_mode: random
+training:
+  algorithm: ppo
+  device: cpu
+  hidden_size: 128
+  rollout_steps: 1026
+  updates: 50
+  epochs: 4
+  minibatch_size: 64
+  learning_rate: 0.00015
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coefficient: 0.5
+  entropy_coefficient: 0.015
+  max_grad_norm: 0.5
+opponents:
+  training: [random, threshold, risk, ev, dp]
+evaluation:
+  games_per_seat: 100
+  seed_bases: [10000, 11000, 12000]
+  heldout_seed_bases: [13000, 14000]
+  matchups:
+    - [random, threshold]
+    - [risk, ev]
+    - [dp, threshold]
+  heldout_matchups:
+    - [threshold_high, risk_strict]
+    - [ev_penalized, dp_reduced]
+tournament:
+  focused_games_per_lineup: 20
+  full_population_games_per_lineup: 5
+  workers: 8
+  seed: 50000
+  initial_rating: 1500.0
+  k_factor: 32.0
+population_defaults:
+  warmup_updates: 10
+  archive_interval: 2
+  max_population: 12
+  learned_opponent_probability: 0.60
+  learned_opponent_probability_start: 0.25
+  learned_opponent_probability_end: 0.60
+  learned_opponent_ramp_updates: 25
+  baseline_floor: 0.40
+  warmup_anchor_probability: 0.20
+  response_signature_weight: 0.50
+  response_signature_games: 1
+  baseline_observation: deck_aware
+  state_bank_size: 2048
+  state_bank_seed: 70000
+screening:
+  seeds: [7, 17, 27]
+  updates: 50
+  games_per_seat: 100
+  focused_tournament_games_per_lineup: 20
+  full_population_games_per_lineup: 2
+  conditions:
+    - name: balanced_control
+      trainer: control
+    - name: balanced_latest_only
+      trainer: league
+      population:
+        retention_strategy: latest
+        max_population: 1
+    - name: balanced_temporal
+      trainer: league
+      population:
+        retention_strategy: temporal
+    - name: balanced_response_diverse
+      trainer: league
+      population:
+        retention_strategy: novelty
+confirmation:
+  seeds: [7, 17, 27, 37, 47]
+  updates: 100
+  games_per_seat: 200
+  focused_tournament_games_per_lineup: 20
+  full_population_games_per_lineup: 5
+  selected_condition: balanced_response_diverse
+  conditions:
+    - name: balanced_control
+      trainer: control
+    - name: balanced_latest_only
+      trainer: league
+      population:
+        retention_strategy: latest
+        max_population: 1
+    - name: balanced_response_diverse
+      trainer: league
+      population:
+        retention_strategy: novelty
+mappo:
+  seeds: [7, 17, 27]
+  updates: 100
+  games_per_seat: 200
+  focused_tournament_games_per_lineup: 20
+gates:
+  min_baseline_win_share: 0.604
+  max_seat_spread: 0.05
+  min_heldout_difference: 0.03
+  max_seed_degradation: -0.02
+  min_final_rating: 1500.0
+  min_final_minus_warmup_elo: 25.0
+  min_behavioral_js_ratio: 1.20
+  min_action_disagreement_delta: 0.05
+  min_paired_final_warmup_difference: 0.0
+fallback:
+  name: seat_aware_response_diverse
+  observation: seat_aware
+  enabled: true
