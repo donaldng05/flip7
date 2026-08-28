@@ -78,6 +78,7 @@ class EpisodeLineup:
 
 
 type OpponentProvider = Callable[[random.Random, int], EpisodeLineup]
+type SeatOpponentProvider = Callable[[random.Random, int, int], EpisodeLineup]
 
 
 def compute_gae(
@@ -120,6 +121,7 @@ class PPOTrainer:
         *,
         opponent_names: tuple[str, ...] = ("random", "threshold", "risk", "ev", "dp"),
         opponent_provider: OpponentProvider | None = None,
+        seat_opponent_provider: SeatOpponentProvider | None = None,
     ) -> None:
         if config.player_count < 3:
             raise ValueError("PPO requires at least three players")
@@ -137,6 +139,7 @@ class PPOTrainer:
         self.opponent_names = opponent_names
         self._factories = available
         self._opponent_provider = opponent_provider or self._default_opponent_provider
+        self._seat_opponent_provider = seat_opponent_provider
         seed_torch(config.seed)
         self._rng = random.Random(config.seed)
         initial_env = self.new_env()
@@ -151,8 +154,18 @@ class PPOTrainer:
         ).to(config.device)
         self.optimizer = optim.Adam(self.network.parameters(), lr=config.learning_rate)
 
-    def new_env(self) -> Flip7VsOpponentsEnv:
-        lineup = self._opponent_provider(self._rng, self.config.player_count)
+    def new_env(
+        self, *, requested_learner_id: int | None = None
+    ) -> Flip7VsOpponentsEnv:
+        if (
+            requested_learner_id is not None
+            and self._seat_opponent_provider is not None
+        ):
+            lineup = self._seat_opponent_provider(
+                self._rng, self.config.player_count, requested_learner_id
+            )
+        else:
+            lineup = self._opponent_provider(self._rng, self.config.player_count)
         if not 0 <= lineup.learner_id < self.config.player_count:
             raise ValueError("opponent provider returned an invalid learner seat")
         return Flip7VsOpponentsEnv(
@@ -372,6 +385,7 @@ def write_history(path: Path, history: list[dict[str, float]]) -> None:
 __all__ = [
     "EpisodeLineup",
     "OpponentProvider",
+    "SeatOpponentProvider",
     "PPOConfig",
     "PPOTrainer",
     "Rollout",

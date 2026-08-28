@@ -39,6 +39,7 @@ DISCARD_COUNT_OFFSET = 23
 DECK_FEATURE_SIZE = HISTOGRAM_SIZE + 2
 
 BASIC_SIZE = PLAYER_FEATURE_SIZE + 1 + PENDING_ACTION_COUNT + 1 + 1
+SEAT_AWARE_SIZE_BASE = BASIC_SIZE
 
 _STATUS_ORDER = (
     PlayerStatus.ACTIVE,
@@ -54,6 +55,7 @@ class ObservationFamily(StrEnum):
     """Named public-information observation layouts."""
 
     BASIC = "basic"
+    SEAT_AWARE = "seat_aware"
     COMPETITIVE = "competitive"
     DECK_AWARE = "deck_aware"
 
@@ -62,6 +64,8 @@ def observation_size(player_count: int, family: ObservationFamily) -> int:
     """Return the observation vector length for a seated game and family."""
     if family is ObservationFamily.BASIC:
         return BASIC_SIZE
+    if family is ObservationFamily.SEAT_AWARE:
+        return BASIC_SIZE + player_count
     competitive = PLAYER_FEATURE_SIZE * player_count + 4 * player_count + 6
     if family is ObservationFamily.COMPETITIVE:
         return competitive
@@ -79,6 +83,11 @@ def encode_observation(
     """Encode one player's observation without draw-pile order."""
     if family is ObservationFamily.BASIC:
         return _encode_basic(state, player_id)
+    if family is ObservationFamily.SEAT_AWARE:
+        basic = _encode_basic(state, player_id)
+        seat = np.zeros(len(state.players), dtype=np.float32)
+        seat[player_id] = 1.0
+        return np.concatenate([basic, seat])
     if family is ObservationFamily.COMPETITIVE:
         return _encode_competitive(state, player_id)
     if family is ObservationFamily.DECK_AWARE:
