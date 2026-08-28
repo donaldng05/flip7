@@ -50,6 +50,7 @@ def _three_player_state(
 
 def test_observation_sizes_match_documented_layouts() -> None:
     assert observation_size(3, ObservationFamily.BASIC) == BASIC_SIZE
+    assert observation_size(3, ObservationFamily.SEAT_AWARE) == 36
     assert observation_size(3, ObservationFamily.COMPETITIVE) == 96
     assert observation_size(3, ObservationFamily.DECK_AWARE) == 120
     assert observation_size(4, ObservationFamily.COMPETITIVE) == 126
@@ -64,6 +65,15 @@ def test_basic_observation_includes_only_the_observing_player_cards() -> None:
     assert observation[6] == 0.0
     assert observation[8] == 0.0
     assert observation.dtype == np.float32
+
+
+def test_seat_aware_observation_adds_only_the_absolute_seat_token() -> None:
+    state = _three_player_state((NumberCard(10), NumberCard(11)))
+    basic = encode_observation(state, 2, ObservationFamily.BASIC)
+    seat_aware = encode_observation(state, 2, ObservationFamily.SEAT_AWARE)
+
+    np.testing.assert_array_equal(seat_aware[:BASIC_SIZE], basic)
+    np.testing.assert_array_equal(seat_aware[BASIC_SIZE:], [0.0, 0.0, 1.0])
 
 
 def test_competitive_observation_marks_ego_and_public_seats() -> None:

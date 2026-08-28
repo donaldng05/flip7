@@ -59,6 +59,27 @@ def test_phase7_config_declares_control_and_population_conditions() -> None:
     ]
 
 
+def test_phase7_stability_config_declares_balanced_conditions_and_fallback() -> None:
+    config = load_config(Path("configs/phase7-follow-up-stability.yaml"))
+    screening = cast(Mapping[str, object], config["screening"])
+    conditions = [
+        cast(Mapping[str, object], condition)
+        for condition in cast(list[object], screening["conditions"])
+    ]
+
+    assert [condition["name"] for condition in conditions] == [
+        "balanced_control",
+        "balanced_latest_only",
+        "balanced_temporal",
+        "balanced_response_diverse",
+    ]
+    assert config["fallback"] == {
+        "name": "seat_aware_response_diverse",
+        "observation": "seat_aware",
+        "enabled": True,
+    }
+
+
 def test_load_config_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "missing.yaml")
