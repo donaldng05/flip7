@@ -23,3 +23,8 @@ Use `scripts/run_phase6.py` to train, evaluate, and summarize the matrix under
 `phase7.yaml` contains the baseline control, mixed policy league, latest-only
 ablation, held-out evaluation, and Elo tournament inputs. Use
 `scripts/run_phase7.py` to write the experiment under `artifacts/phase7/`.
+
+`phase7-follow-up.yaml` contains the fixed-bank diversity screening, five-seed
+confirmation, and evidence-gated MAPPO pilot. Use
+`scripts/run_phase7_follow_up.py`; its outputs are isolated under
+`artifacts/phase7-follow-up/`.

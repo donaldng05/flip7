@@ -17,3 +17,5 @@ Phase 5 training decisions are recorded in
 [`0007-custom-pytorch-ppo.md`](0007-custom-pytorch-ppo.md).
 Phase 7 league self-play and tournament decisions are recorded in
 [`0008-population-self-play-and-tournament-evaluation.md`](0008-population-self-play-and-tournament-evaluation.md).
+Phase 7 follow-up diversity and MAPPO criteria are recorded in
+[`0009-phase7-follow-up-diversity-and-mappo.md`](0009-phase7-follow-up-diversity-and-mappo.md).

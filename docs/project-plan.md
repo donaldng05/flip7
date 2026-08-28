@@ -166,6 +166,13 @@ latest-snapshot ablation using held-out opponent variants and seat-rotated
 tournaments with Elo. MAPPO remains evidence-gated until centralized-critic
 credit assignment is justified by the league results.
 
+The Phase 7 follow-up strengthens that evidence boundary with fixed-bank
+behavioural diversity metrics, novelty-aware retention, paired multi-game
+tournaments, five-seed confirmation, and a targeted MAPPO pilot. Phase 8
+should begin only after the population-diversity and stable-adaptation gates
+are reported, with MAPPO adopted, deferred, or explicitly sent to another
+focused investigation.
+
 ---
 
 ### Phase 8 — Robustness & Generalization

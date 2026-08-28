@@ -129,6 +129,7 @@ opponent adaptation from centralized-critic and multi-agent credit-assignment
 changes. A MAPPO pilot is justified only if the league fails the robustness
 gates after verified opponent coverage or if tournament results show persistent
 policy cycling/collapse that population sampling cannot resolve. The completed
-matrix met the robustness and adaptation criteria; the held-out population
-margin failed without exposing a centralized-critic limitation, so MAPPO is
-deferred.
+matrix passed the robustness gate, but did not meet the all-seed tournament
+adaptation gate. The held-out population margin also failed without exposing a
+centralized-critic limitation, so both findings remain diagnostic and MAPPO is
+deferred to the Phase 7 follow-up rather than treated as an adopted method.
