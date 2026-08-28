@@ -1,0 +1,126 @@
+# Phase 7 follow-up: population diversity, stable adaptation, and MAPPO.
+experiment: phase7-follow-up
+players: 3
+env:
+  observation: basic
+  reward: sparse_win
+  learner_id: 0
+  learner_seat_mode: random
+training:
+  algorithm: ppo
+  device: cpu
+  hidden_size: 128
+  rollout_steps: 1024
+  updates: 50
+  epochs: 4
+  minibatch_size: 64
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coefficient: 0.5
+  entropy_coefficient: 0.01
+  max_grad_norm: 0.5
+opponents:
+  training: [random, threshold, risk, ev, dp]
+evaluation:
+  games_per_seat: 100
+  seed_bases: [10000, 11000, 12000]
+  heldout_seed_bases: [13000, 14000]
+  matchups:
+    - [random, threshold]
+    - [risk, ev]
+    - [dp, threshold]
+  heldout_matchups:
+    - [threshold_high, risk_strict]
+    - [ev_penalized, dp_reduced]
+tournament:
+  games_per_lineup: 10
+  workers: 8
+  seed: 40000
+  initial_rating: 1500.0
+  k_factor: 32.0
+references:
+  phase7_control: artifacts/phase7/baseline_control
+  league_mixed: artifacts/phase7/league_mixed
+  latest_only: artifacts/phase7/latest_only
+  matched_control: artifacts/phase7/baseline_control
+  matched_latest_only: artifacts/phase7/latest_only
+screening:
+  seeds: [7, 17, 27]
+  updates: 50
+  games_per_seat: 100
+  tournament_games_per_lineup: 1
+  conditions:
+    - name: phase7_control
+      kind: reference
+    - name: league_mixed
+      kind: reference
+    - name: latest_only
+      kind: reference
+    - name: latest_only_dense
+      trainer: league
+      population:
+        warmup_updates: 10
+        archive_interval: 2
+        max_population: 1
+        learned_opponent_probability: 0.75
+        baseline_observation: deck_aware
+        retention_strategy: latest
+    - name: temporal_dense
+      trainer: league
+      population:
+        warmup_updates: 10
+        archive_interval: 2
+        max_population: 12
+        learned_opponent_probability: 0.75
+        baseline_observation: deck_aware
+        retention_strategy: temporal
+    - name: novelty_dense
+      trainer: league
+      population:
+        warmup_updates: 10
+        archive_interval: 2
+        max_population: 12
+        learned_opponent_probability: 0.75
+        baseline_observation: deck_aware
+        retention_strategy: novelty
+confirmation:
+  seeds: [7, 17, 27, 37, 47]
+  updates: 100
+  games_per_seat: 200
+  tournament_games_per_lineup: 10
+  selected_condition: novelty_dense
+  conditions:
+    - name: matched_control
+      trainer: ppo
+      population:
+        warmup_updates: 10
+        archive_interval: 2
+        max_population: 1
+        learned_opponent_probability: 0.0
+        baseline_observation: deck_aware
+        retention_strategy: latest
+    - name: matched_latest_only
+      trainer: league
+      population:
+        warmup_updates: 10
+        archive_interval: 2
+        max_population: 1
+        learned_opponent_probability: 0.75
+        baseline_observation: deck_aware
+        retention_strategy: latest
+    - name: novelty_dense
+      trainer: league
+      population:
+        warmup_updates: 10
+        archive_interval: 2
+        max_population: 12
+        learned_opponent_probability: 0.75
+        baseline_observation: deck_aware
+        retention_strategy: novelty
+mappo:
+  seeds: [7, 17, 27]
+  updates: 100
+  games_per_seat: 200
+  tournament_games_per_lineup: 10
