@@ -314,11 +314,46 @@ def pairwise_behavior_metrics(
 
 
 def analyze_snapshots(
-    snapshots: Sequence[SnapshotLike], state_bank: StateBank
+    snapshots: Sequence[SnapshotLike],
+    state_bank: StateBank,
+    response_signatures: Mapping[str, Sequence[float]] | None = None,
 ) -> dict[str, object]:
     """Return JSON-compatible diversity metrics for every archived snapshot."""
     behaviors = [policy_behavior(snapshot, state_bank) for snapshot in snapshots]
-    return pairwise_behavior_metrics(behaviors)
+    metrics = pairwise_behavior_metrics(behaviors)
+    if response_signatures:
+        names = [behavior.policy_id for behavior in behaviors]
+        response_matrix: dict[str, dict[str, float]] = {name: {} for name in names}
+        off_diagonal: list[float] = []
+        for first in names:
+            for second in names:
+                first_signature = response_signatures.get(first)
+                second_signature = response_signatures.get(second)
+                if first_signature is None or second_signature is None:
+                    continue
+                if len(first_signature) != len(second_signature):
+                    raise ValueError("response signatures must have equal dimensions")
+                distance = float(
+                    np.mean(
+                        np.abs(
+                            np.asarray(first_signature, dtype=np.float64)
+                            - np.asarray(second_signature, dtype=np.float64)
+                        )
+                    )
+                )
+                response_matrix[first][second] = distance
+                if first != second:
+                    off_diagonal.append(distance)
+        metrics["pairwise_response_distance"] = response_matrix
+        metrics["mean_pairwise_response_distance"] = (
+            float(np.mean(off_diagonal)) if off_diagonal else 0.0
+        )
+        metrics["response_signatures"] = {
+            name: list(response_signatures[name])
+            for name in names
+            if name in response_signatures
+        }
+    return metrics
 
 
 def non_transitive_cycles(

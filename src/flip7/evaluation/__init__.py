@@ -41,6 +41,11 @@ from flip7.evaluation.phase7 import (
     validate_artifact_manifest,
     write_tournament,
 )
+from flip7.evaluation.stability import (
+    PairedEvaluation,
+    PairedGame,
+    run_paired_rotated_evaluation,
+)
 from flip7.evaluation.tournament import run_game, run_matchup, write_results
 
 __all__ = [
@@ -81,4 +86,7 @@ __all__ = [
     "run_paired_round_robin",
     "schedule_as_dict",
     "validate_followup_manifest",
+    "PairedEvaluation",
+    "PairedGame",
+    "run_paired_rotated_evaluation",
 ]
