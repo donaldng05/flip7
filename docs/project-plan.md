@@ -173,6 +173,12 @@ should begin only after the population-diversity and stable-adaptation gates
 are reported, with MAPPO adopted, deferred, or explicitly sent to another
 focused investigation.
 
+The stability follow-up adds deterministic seat-balanced rollouts, a gradual
+opponent curriculum, training-only response signatures, paired held-out
+comparisons, and focused final-versus-warmup tournaments. Its seat-aware
+fallback and MAPPO pilot remain gated by the balanced-basic confirmation
+results.
+
 ---
 
 ### Phase 8 — Robustness & Generalization
