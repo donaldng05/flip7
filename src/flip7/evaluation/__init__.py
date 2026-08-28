@@ -1,5 +1,28 @@
 """Reproducible baseline-agent evaluation utilities."""
 
+from flip7.evaluation.diversity import (
+    PolicyBehavior,
+    StateBank,
+    StateBankEntry,
+    action_entropy,
+    action_support,
+    analyze_snapshots,
+    build_state_bank,
+    jensen_shannon_divergence,
+    masked_action_probabilities,
+    mean_jensen_shannon_divergence,
+    non_transitive_cycles,
+    pairwise_behavior_metrics,
+)
+from flip7.evaluation.follow_up import (
+    ScheduledGame,
+    build_paired_schedule,
+    direct_final_warmup_comparison,
+    matchup_win_share_matrix,
+    run_paired_round_robin,
+    schedule_as_dict,
+    validate_followup_manifest,
+)
 from flip7.evaluation.metrics import GameResult, MatchupMetrics
 from flip7.evaluation.phase6 import (
     PHASE6_MATCHUPS,
@@ -39,4 +62,23 @@ __all__ = [
     "run_round_robin",
     "validate_artifact_manifest",
     "write_tournament",
+    "PolicyBehavior",
+    "StateBank",
+    "StateBankEntry",
+    "action_entropy",
+    "action_support",
+    "analyze_snapshots",
+    "build_state_bank",
+    "jensen_shannon_divergence",
+    "mean_jensen_shannon_divergence",
+    "masked_action_probabilities",
+    "non_transitive_cycles",
+    "pairwise_behavior_metrics",
+    "ScheduledGame",
+    "build_paired_schedule",
+    "direct_final_warmup_comparison",
+    "matchup_win_share_matrix",
+    "run_paired_round_robin",
+    "schedule_as_dict",
+    "validate_followup_manifest",
 ]

@@ -77,6 +77,10 @@ class PPOAgent:
                 torch.multinomial(probabilities, 1, generator=self._generator).item()
             )
 
+    def reseed(self, seed: int) -> None:
+        """Reset stochastic inference for a new explicitly seeded episode."""
+        self._generator.manual_seed(seed)
+
     @classmethod
     def from_checkpoint(
         cls,
