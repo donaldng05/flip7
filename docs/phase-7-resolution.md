@@ -1,7 +1,7 @@
 # Phase 7 scientific resolution
 
-Status: implementation complete; empirical resolution pending. No Phase 8
-promotion decision has been made.
+Status: Phase 7 remains inconclusive; no Phase 8 promotion decision has been
+made.
 
 This work is isolated on the `phase-7-resolve` branch and preserves the
 previous Phase 7 artifacts as immutable references.
@@ -32,14 +32,47 @@ reward, evaluated with sparse-win metrics.
   runtime.
 - MAPPO is explicitly deferred from this resolution.
 
+## Calibration rule
+
+The original Phase 6 pooled `basic_random` spread is retired as a seat-
+robustness reference. It combined policies from different training seeds and
+could hide seed-specific seat instability. Historical Phase 6 artifacts remain
+immutable, but their `seed_summaries` are now the source of truth.
+
+Calibration uses the training seed as the independent unit. For every seed it
+reports the three seat win shares, the derived seat spread, pooled win share,
+and 95% uncertainty intervals. Fresh evaluation is stratified by matchup and
+learner seat; when raw game outcomes are available, intervals use a seeded
+game-level bootstrap. Legacy summary-only artifacts use a conservative normal
+approximation and are labeled accordingly.
+
+The 5-point spread remains the long-term robustness target, not a protocol
+validity test. A new candidate is compared with the calibrated reference per
+seed: lower-spread confidence intervals are `better`, higher-spread intervals
+are `worse`, and overlapping intervals are `compatible`. A weak reference is
+reported as `reference-not-robust / candidate-comparison-only`; it is never
+reported as `protocol-invalid` or used to claim a recipe failure.
+
+Run the artifact-only recalibration with:
+
+```powershell
+uv run python scripts/calibrate_phase6_reference.py --reevaluate-reference
+```
+
+This writes `artifacts/phase7-resolve/calibration-v2.json` and does not train
+or modify any Phase 6 or Phase 7 checkpoint.
+
+Omit `--reevaluate-reference` to reanalyze the existing fresh audit using its
+summary-level uncertainty when a completed audit is already available.
+
 ## Scientific decision rule
 
 - **PASS:** the corrected potential-win candidate passes every required
   confirmation gate for every confirmation seed.
 - **FAIL:** the evaluation protocol is validated, but the corrected recipe or
   potential-win intervention fails a required gate.
-- **INCONCLUSIVE:** the known-good Phase 6 reference cannot be reproduced or
-  the evaluation/training provenance is incomplete.
+- **INCONCLUSIVE:** the reference needs recalibration, is not robust under
+  per-seed evaluation, or the evaluation/training provenance is incomplete.
 
 ## Commands
 
@@ -71,15 +104,27 @@ python scripts/run_phase7_follow_up_stability.py `
 Confirmation is permitted only when potential-win screening passes and uses
 the same potential-win artifact root with `--stage confirmation`.
 
+The required order is calibration-v2, corrected sparse-reward control
+interpretation, potential-win screening, confirmation, and only then any MAPPO
+pilot. Phase 8 remains locked until a final candidate passes the per-seed
+strength, relative seat-stability, diversity, and tournament gates.
+
 ## Results
 
-The one-game smoke audit completed and exercised the real Phase 6 and Phase 7
-manifest layouts, but it is intentionally not evidence for a scientific
-decision. The pre-registered 1,000-game, two-batch audit was started against
-the immutable Phase 6 reference, current balanced control, and current
-seat-aware fallback. It remained CPU-bound for roughly 90 minutes and was
-stopped before its final JSON write; no corrected training or reward
-intervention was started. A future run must complete the audit before any
-screening or confirmation result can be classified as PASS or FAIL.
+The completed fresh audit reproduced the Phase 6 `basic_random` win share
+within 0.35 percentage points, but it exposed the pooled spread problem. The
+historical pooled spread was 2.72 points, while the fresh pooled spread was
+5.44 points and the per-training-seed fresh spreads were approximately 9--10
+points. The historical per-seed spreads were already approximately 8.5--13.5
+points.
 
-Existing failed results are not overwritten.
+`artifacts/phase7-resolve/calibration-v2.json` records the corrected
+interpretation: the reference reproduces pooled strength, is not reliably
+seat-robust under the 5-point target, and both current controls are compatible
+with the reference on a per-seed basis. Therefore Phase 7 remains
+**INCONCLUSIVE**; this does not establish that segmented GAE caused or failed
+to cause the original result. No corrected reward intervention, MAPPO pilot,
+or Phase 8 promotion is authorized by this artifact.
+
+The historical pooled result is not overwritten. Existing failed results are
+not overwritten either; the calibration-v2 artifact is a separate report.

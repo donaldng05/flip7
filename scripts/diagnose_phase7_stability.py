@@ -17,7 +17,10 @@ from flip7.evaluation import (
     summarize_rotated_results,
 )
 from flip7.evaluation.diagnostics import (
+    aggregate_seed_summaries,
+    bootstrap_rotated_uncertainty,
     classify_diagnostic,
+    compare_seed_spreads,
     config_fingerprint,
     reference_reproduces,
     resolve_manifest_files,
@@ -38,7 +41,7 @@ PHASE6_REQUIRED_FILES = ("checkpoint", "training_history", "evaluation")
 DEFAULT_CURRENT_ROOT = Path("artifacts/phase7-follow-up-stability-recipe-scheduled")
 DEFAULT_REFERENCE_ROOT = Path("artifacts/phase6/basic_random")
 DEFAULT_REFERENCE_SUMMARY = Path("artifacts/phase6/summary.json")
-DEFAULT_OUTPUT = Path("artifacts/phase7-resolve/diagnostic.json")
+DEFAULT_OUTPUT = Path("artifacts/phase7-resolve/calibration-v2.json")
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:
@@ -111,6 +114,7 @@ def _evaluate(
     *,
     games: int,
     seed_bases: Sequence[int],
+    bootstrap_replicates: int,
 ) -> tuple[list[Any], dict[str, object]]:
     results = run_rotated_matchups(
         _cached_policy(checkpoint),
@@ -120,7 +124,13 @@ def _evaluate(
         observation=observation,
         matchups=PHASE6_MATCHUPS,
     )
-    return results, summarize_rotated_results(results)
+    summary = summarize_rotated_results(results)
+    summary["uncertainty"] = bootstrap_rotated_uncertainty(
+        results,
+        seed=sum((index + 1) * value for index, value in enumerate(seed_bases)),
+        replicates=bootstrap_replicates,
+    )
+    return results, summary
 
 
 def _observation(manifest: Mapping[str, object], *, fallback: str) -> ObservationFamily:
@@ -137,9 +147,25 @@ def _condition_payload(
     runs: list[dict[str, object]],
     results: Sequence[Any],
 ) -> dict[str, object]:
+    per_seed = _aggregate_runs_by_seed(runs)
     return {
         "runs": runs,
         "aggregate": summarize_rotated_results(results),
+        "per_seed": per_seed,
+    }
+
+
+def _aggregate_runs_by_seed(
+    runs: Sequence[Mapping[str, object]],
+) -> dict[int, dict[str, object]]:
+    grouped: dict[int, list[Mapping[str, object]]] = {}
+    for run in runs:
+        seed = int(run["seed"])
+        summary = _mapping(run["summary"], "run.summary")
+        grouped.setdefault(seed, []).append(summary)
+    return {
+        seed: aggregate_seed_summaries(summaries)
+        for seed, summaries in sorted(grouped.items())
     }
 
 
@@ -180,11 +206,20 @@ def main() -> None:
     reference_summary = _read_mapping(args.reference_summary, "Phase 6 summary")
     conditions = _mapping(reference_summary["conditions"], "Phase 6 conditions")
     reference_condition = _mapping(conditions["basic_random"], "basic_random")
+    historical_seed_summaries = {
+        int(item["seed"]): _mapping(item["summary"], "historical seed summary")
+        for item in cast(list[object], reference_condition["seed_summaries"])
+    }
     expected = _mapping(reference_condition["aggregate"], "basic_random aggregate")
     expected_win_share = float(expected["win_share"])
     expected_seat_spread = float(expected["seat_spread"])
     resolution = _mapping(root["resolution"], "resolution")
-    tolerance = float(resolution["control_reproduction_tolerance"])
+    tolerance = float(
+        resolution.get(
+            "reference_comparison_tolerance",
+            resolution["control_reproduction_tolerance"],
+        )
+    )
 
     reference_all: list[Any] = []
     reference_runs: list[dict[str, object]] = []
@@ -214,6 +249,9 @@ def main() -> None:
                 _observation(reference_manifest, fallback="basic"),
                 games=args.games_per_seat,
                 seed_bases=seed_bases,
+                bootstrap_replicates=int(
+                    resolution.get("uncertainty_replicates", 1000)
+                ),
             )
             reference_all.extend(results)
             reference_runs.append({"seed": seed, "batch": batch, "summary": summary})
@@ -238,6 +276,9 @@ def main() -> None:
                     _observation(manifest, fallback="basic"),
                     games=args.games_per_seat,
                     seed_bases=seed_bases,
+                    bootstrap_replicates=int(
+                        resolution.get("uncertainty_replicates", 1000)
+                    ),
                 )
                 current_all[condition].extend(results)
                 current_batch_results[condition][batch].extend(results)
@@ -251,14 +292,17 @@ def main() -> None:
         batch_runs = [run for run in reference_runs if run["batch"] == batch]
         summaries = [cast(Mapping[str, object], run["summary"]) for run in batch_runs]
         reference_batch_aggregates.append(_mean_summary(summaries))
-    reference_reproduction = all(
-        reference_reproduces(
-            expected_win_share,
-            expected_seat_spread,
-            cast(Mapping[str, object], run["summary"]),
-            tolerance=tolerance,
-        )
-        for run in reference_runs
+    fresh_reference_by_seed = _aggregate_runs_by_seed(reference_runs)
+    reference_reproduction = reference_reproduces(
+        historical_seed_summaries,
+        fresh_reference_by_seed,
+        tolerance=tolerance,
+    )
+    gates = _mapping(root["gates"], "gates")
+    max_seat_spread = float(gates["max_seat_spread"])
+    reference_is_robust = all(
+        float(summary["seat_spread"]) <= max_seat_spread
+        for summary in fresh_reference_by_seed.values()
     )
 
     current_payload: dict[str, object] = {}
@@ -267,33 +311,32 @@ def main() -> None:
             summarize_rotated_results(current_batch_results[condition][batch])
             for batch in range(args.repeats)
         ]
-        current_payload[condition] = _condition_payload(
+        payload = _condition_payload(
             current_runs[condition], current_all[condition]
         ) | {"batch_aggregates": batch_aggregates}
+        candidate_by_seed = cast(dict[int, dict[str, object]], payload["per_seed"])
+        payload["relative_to_reference"] = compare_seed_spreads(
+            fresh_reference_by_seed,
+            candidate_by_seed,
+        )
+        current_payload[condition] = payload
 
-    control_summary = (
-        cast(Mapping[str, object], current_payload["balanced_control"])["aggregate"]
-        if "balanced_control" in current_payload
-        else None
-    )
-    control_batches = (
-        cast(Mapping[str, object], current_payload["balanced_control"])[
-            "batch_aggregates"
-        ]
-        if "balanced_control" in current_payload
-        else []
-    )
-    gates = _mapping(root["gates"], "gates")
+    control_comparisons = []
+    if "balanced_control" in current_payload:
+        control_payload = _mapping(
+            current_payload["balanced_control"], "balanced_control payload"
+        )
+        control_comparisons = cast(
+            list[Mapping[str, object]], control_payload["relative_to_reference"]
+        )
     classification = classify_diagnostic(
         reference_valid=reference_reproduction,
-        control_summary=cast(Mapping[str, object] | None, control_summary),
-        control_batch_summaries=cast(Sequence[Mapping[str, object]], control_batches),
-        min_win_share=float(gates["min_baseline_win_share"]),
-        max_seat_spread=float(gates["max_seat_spread"]),
+        reference_is_robust=reference_is_robust,
+        control_seed_comparisons=control_comparisons,
     )
     output: dict[str, object] = {
         "experiment": str(root["experiment"]),
-        "diagnostic": "phase7-stability-resolution",
+        "diagnostic": "phase7-stability-calibration-v2",
         "protocol": {
             "games_per_seat": args.games_per_seat,
             "repeats": args.repeats,
@@ -302,6 +345,7 @@ def main() -> None:
             "seed_stride": args.seed_stride,
             "matchups": [list(pair) for pair in PHASE6_MATCHUPS],
             "phase6_reproduction_tolerance": tolerance,
+            "calibration_rule": "per_seed_uncertainty_reference_envelope",
         },
         "provenance": provenance,
         "reference": {
@@ -309,16 +353,24 @@ def main() -> None:
                 "win_share": expected_win_share,
                 "seat_spread": expected_seat_spread,
             },
+            "historical_per_seed": historical_seed_summaries,
+            "fresh_per_seed": fresh_reference_by_seed,
             "runs": reference_runs,
             "aggregate": reference_aggregate,
             "reproduces_phase6": reference_reproduction,
+            "calibration_status": (
+                "calibrated" if reference_reproduction else "recalibration-required"
+            ),
+            "target_met_per_seed": reference_is_robust,
             "batch_aggregates": reference_batch_aggregates,
         },
         "current": current_payload,
         "classification": classification,
         "interpretation": {
             "protocol_valid": reference_reproduction,
+            "reference_not_robust": not reference_is_robust,
             "current_control_is_calibration_only": True,
+            "phase7_status": "inconclusive",
             "phase8_unlocked": False,
         },
     }

@@ -136,4 +136,9 @@ resolution:
   diagnostic_repeats: 2
   diagnostic_games_per_seat: 1000
   control_reproduction_tolerance: 0.01
+  calibration_rule: per_seed_uncertainty_reference_envelope
+  calibration_output: artifacts/phase7-resolve/calibration-v2.json
+  uncertainty_method: stratified_game_bootstrap
+  uncertainty_replicates: 1000
+  reference_comparison_tolerance: 0.01
   intervention: potential_win

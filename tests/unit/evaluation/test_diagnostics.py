@@ -5,11 +5,46 @@ from pathlib import Path
 import pytest
 
 from flip7.evaluation.diagnostics import (
+    aggregate_seed_summaries,
+    bootstrap_rotated_uncertainty,
     classify_diagnostic,
+    compare_seed_spreads,
     reference_reproduces,
     resolve_manifest_files,
     validate_seed_plan,
 )
+from flip7.evaluation.metrics import MatchupMetrics
+
+
+def _summary(
+    seats: tuple[float, float, float],
+    *,
+    games: int = 300,
+    seat_margin: float = 0.01,
+    spread_interval: tuple[float, float] | None = None,
+) -> dict[str, object]:
+    win_share = sum(seats) / len(seats)
+    spread = max(seats) - min(seats)
+    return {
+        "games": games,
+        "win_share": win_share,
+        "approximate_95_ci": [win_share - seat_margin, win_share + seat_margin],
+        "seat_spread": spread,
+        "per_seat": {
+            str(seat): {
+                "win_share": value,
+                "approximate_95_ci": [value - seat_margin, value + seat_margin],
+            }
+            for seat, value in enumerate(seats)
+        },
+        "uncertainty": {
+            "method": "normal_summary_approximation",
+            "seat_spread_interval": list(
+                spread_interval
+                or (max(0.0, spread - seat_margin), spread + seat_margin)
+            ),
+        },
+    }
 
 
 def test_validate_seed_plan_rejects_overlap_and_training_seeds() -> None:
@@ -62,42 +97,117 @@ def test_resolve_manifest_files_validates_missing_files_and_seed(
         )
 
 
-def test_diagnostic_classification_distinguishes_protocol_recipe_and_noise() -> None:
-    good_reference = {"win_share": 0.654, "seat_spread": 0.027}
-    assert reference_reproduces(0.654, 0.027, good_reference, tolerance=0.01)
-    assert not reference_reproduces(0.60, 0.10, good_reference, tolerance=0.01)
+def test_reference_reproduction_uses_seed_level_uncertainty() -> None:
+    historical = {
+        7: _summary((0.60, 0.68, 0.68), seat_margin=0.05),
+        17: _summary((0.70, 0.72, 0.62), seat_margin=0.05),
+    }
+    fresh = {
+        7: _summary((0.61, 0.69, 0.68), seat_margin=0.02),
+        17: _summary((0.69, 0.70, 0.63), seat_margin=0.02),
+    }
+    assert reference_reproduces(historical, fresh, tolerance=0.01)
 
-    passing = {"win_share": 0.65, "seat_spread": 0.04}
-    failing = {"win_share": 0.65, "seat_spread": 0.08}
+    seed_level_win_share_failure = {
+        7: _summary((0.65, 0.65, 0.65), seat_margin=0.01),
+        17: _summary((0.40, 0.40, 0.40), seat_margin=0.01),
+    }
+    assert not reference_reproduces(
+        historical, seed_level_win_share_failure, tolerance=0.01
+    )
+
+    pooled_pass_seed_fail = {
+        7: _summary((0.55, 0.65, 0.75), seat_margin=0.01),
+        17: _summary((0.55, 0.65, 0.75), seat_margin=0.01),
+    }
+    assert not all(
+        float(summary["seat_spread"]) <= 0.05
+        for summary in pooled_pass_seed_fail.values()
+    )
+
+
+def test_seed_aggregation_and_relative_spread_classification() -> None:
+    reference = {7: _summary((0.62, 0.66, 0.71), seat_margin=0.005)}
+    better = {7: _summary((0.64, 0.66, 0.68), seat_margin=0.005)}
+    worse = {7: _summary((0.57, 0.67, 0.73), seat_margin=0.005)}
+    compatible = {7: _summary((0.61, 0.67, 0.72), seat_margin=0.02)}
+
+    assert aggregate_seed_summaries([reference[7]])["seat_spread"] == pytest.approx(
+        0.09
+    )
+    assert compare_seed_spreads(reference, better)[0]["relation"] == "better"
+    assert compare_seed_spreads(reference, worse)[0]["relation"] == "worse"
+    assert compare_seed_spreads(reference, compatible)[0]["relation"] == "compatible"
+
+
+def test_bootstrap_is_stratified_by_learner_seat_and_reproducible() -> None:
+    results = [
+        MatchupMetrics(
+            ("ppo", "a", "b"),
+            3,
+            win_share_samples={"ppo": [1.0, 0.0, 1.0]},
+        ),
+        MatchupMetrics(
+            ("a", "ppo", "b"),
+            3,
+            win_share_samples={"ppo": [0.0, 1.0, 0.0]},
+        ),
+        MatchupMetrics(
+            ("a", "b", "ppo"),
+            3,
+            win_share_samples={"ppo": [0.0, 0.0, 1.0]},
+        ),
+    ]
+    first = bootstrap_rotated_uncertainty(results, seed=11, replicates=200)
+    second = bootstrap_rotated_uncertainty(results, seed=11, replicates=200)
+
+    assert first == second
+    assert first["method"] == "stratified_game_bootstrap"
+    assert set(first["seat_intervals"]) == {"0", "1", "2"}
+    assert len(first["seat_spread_interval"]) == 2
+
+
+def test_diagnostic_classification_distinguishes_reference_recipe_and_noise() -> None:
+    passing = [{"seed": 7, "relation": "better"}]
+    uncertain = [{"seed": 7, "relation": "compatible"}]
+    failing = [{"seed": 7, "relation": "worse"}]
     assert (
         classify_diagnostic(
             reference_valid=False,
-            control_summary=failing,
-            control_batch_summaries=[failing],
+            reference_is_robust=False,
+            control_seed_comparisons=failing,
         )
-        == "protocol-invalid"
+        == "reference-recalibration-required"
     )
     assert (
         classify_diagnostic(
             reference_valid=True,
-            control_summary=failing,
-            control_batch_summaries=[failing, failing],
+            reference_is_robust=True,
+            control_seed_comparisons=failing,
         )
         == "recipe-failure"
     )
     assert (
         classify_diagnostic(
             reference_valid=True,
-            control_summary=passing,
-            control_batch_summaries=[passing, failing],
+            reference_is_robust=True,
+            control_seed_comparisons=uncertain,
         )
         == "evaluation-noise/inconclusive"
     )
     assert (
         classify_diagnostic(
             reference_valid=True,
-            control_summary=passing,
-            control_batch_summaries=[passing, passing],
+            reference_is_robust=True,
+            control_seed_comparisons=passing,
         )
         == "protocol-valid"
+    )
+    assert (
+        classify_diagnostic(
+            reference_valid=True,
+            reference_is_robust=False,
+            control_seed_comparisons=failing,
+        )
+        == "reference-not-robust / candidate-comparison-only"
     )

@@ -14,6 +14,10 @@ def _counter_map() -> dict[str, Counter[str]]:
     return {}
 
 
+def _sample_map() -> dict[str, list[float]]:
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class GameResult:
     """Public metrics collected from one complete game."""
@@ -47,6 +51,10 @@ class MatchupMetrics:
     flip7_frequency: float = 0.0
     tie_frequency: float = 0.0
     action_counts: dict[str, Counter[str]] = field(default_factory=_counter_map)
+    # Kept in memory for uncertainty-aware diagnostics.  It is intentionally
+    # not serialized by ``as_dict`` so existing evaluation artifacts remain
+    # compact and backward-compatible.
+    win_share_samples: dict[str, list[float]] = field(default_factory=_sample_map)
 
     def add(self, result: GameResult) -> None:
         self.games += 1
@@ -54,6 +62,9 @@ class MatchupMetrics:
         share = 1.0 / len(winners) if winners else 0.0
         for seat, agent_name in enumerate(result.agents):
             self.win_share[agent_name] = self.win_share.get(agent_name, 0.0) + (
+                share if seat in winners else 0.0
+            )
+            self.win_share_samples.setdefault(agent_name, []).append(
                 share if seat in winners else 0.0
             )
             self.final_score[agent_name] = (
