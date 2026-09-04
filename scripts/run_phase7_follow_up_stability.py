@@ -103,6 +103,7 @@ def _training_config(
     *,
     updates: int,
     observation_override: str | None = None,
+    training_override: Mapping[str, object] | None = None,
 ) -> PPOConfig:
     environment = _mapping(root["env"], "env")
     training = dict(_mapping(root["training"], "training"))
@@ -118,6 +119,8 @@ def _training_config(
             "reward": str(environment["reward"]),
         }
     )
+    if training_override is not None:
+        training.update(training_override)
     return PPOConfig(**training)
 
 
@@ -234,6 +237,15 @@ def _mappo_config(
     environment = _mapping(root["env"], "env")
     training = dict(_mapping(root["training"], "training"))
     training.pop("algorithm", None)
+    for key in (
+        "network",
+        "critic_seat_conditioned",
+        "learning_rate_end",
+        "entropy_coefficient_end",
+        "target_kl",
+        "value_clip_epsilon",
+    ):
+        training.pop(key, None)
     training.update(
         {
             "seed": seed,
@@ -407,6 +419,8 @@ def _run_condition(
     full_games: int,
     workers: int,
     observation_override: str | None = None,
+    training_override: Mapping[str, object] | None = None,
+    run_full_tournament: bool = True,
 ) -> dict[str, object]:
     name = str(condition["name"])
     run_dir = output_root / name / f"seed-{seed}"
@@ -420,8 +434,20 @@ def _run_condition(
     observation_value = observation_override or str(
         _mapping(root["env"], "env")["observation"]
     )
+    condition_training = (
+        _mapping(condition["training"], "condition.training")
+        if "training" in condition
+        else {}
+    )
+    merged_training = dict(condition_training)
+    if training_override is not None:
+        merged_training.update(training_override)
     config = _training_config(
-        root, seed, updates=updates, observation_override=observation_value
+        root,
+        seed,
+        updates=updates,
+        observation_override=observation_value,
+        training_override=merged_training,
     )
     baseline_names = _strings(
         _mapping(root["opponents"], "opponents")["training"],
@@ -493,30 +519,33 @@ def _run_condition(
             games=focused_games,
             seed=int(tournament_values["seed"]) + seed + 900_000,
         )
-    full_participants = _participants(
-        checkpoint,
-        ObservationFamily(observation_value),
-        snapshots,
-        warmup,
-        include_snapshots=True,
-    )
-    full_schedule = build_paired_schedule(
-        tuple(item.name for item in full_participants),
-        games=full_games,
-        seed=int(tournament_values["seed"]) + seed + 1_000_000,
-    )
-    full_paths = dict(checkpoint_paths)
-    full_paths.update({item.policy_id: item.path for item in snapshots})
-    full, full_schedule = run_paired_round_robin(
-        full_participants,
-        games=full_games,
-        seed=int(tournament_values["seed"]) + seed + 1_000_000,
-        initial_rating=float(tournament_values["initial_rating"]),
-        k_factor=float(tournament_values["k_factor"]),
-        schedule=full_schedule,
-        workers=workers,
-        checkpoint_paths=full_paths,
-    )
+    full: Any | None = None
+    full_schedule: tuple[Any, ...] = ()
+    if run_full_tournament:
+        full_participants = _participants(
+            checkpoint,
+            ObservationFamily(observation_value),
+            snapshots,
+            warmup,
+            include_snapshots=True,
+        )
+        full_schedule = build_paired_schedule(
+            tuple(item.name for item in full_participants),
+            games=full_games,
+            seed=int(tournament_values["seed"]) + seed + 1_000_000,
+        )
+        full_paths = dict(checkpoint_paths)
+        full_paths.update({item.policy_id: item.path for item in snapshots})
+        full, full_schedule = run_paired_round_robin(
+            full_participants,
+            games=full_games,
+            seed=int(tournament_values["seed"]) + seed + 1_000_000,
+            initial_rating=float(tournament_values["initial_rating"]),
+            k_factor=float(tournament_values["k_factor"]),
+            schedule=full_schedule,
+            workers=workers,
+            checkpoint_paths=full_paths,
+        )
     if state_bank is not None:
         diversity = analyze_snapshots(
             archived,
@@ -561,7 +590,9 @@ def _run_condition(
         diversity["archived_snapshots"] = [item.as_dict() for item in archived]
         diversity["active_snapshots"] = [item.as_dict() for item in snapshots]
         diversity["training_roster"] = list(baseline_names)
-        diversity["matchup_win_share_matrix"] = matchup_win_share_matrix(full)
+        diversity["matchup_win_share_matrix"] = matchup_win_share_matrix(
+            focused if full is None else full
+        )
         diversity["non_transitive_cycles"] = non_transitive_cycles(
             cast(
                 Mapping[str, Mapping[str, float]],
@@ -573,14 +604,16 @@ def _run_condition(
             "policies": [],
             "active_population": {"policies": []},
             "training_roster": list(baseline_names),
-            "matchup_win_share_matrix": matchup_win_share_matrix(full),
+            "matchup_win_share_matrix": matchup_win_share_matrix(
+                focused if full is None else full
+            ),
             "non_transitive_cycles": [],
         }
     focused_elo = focused.elo
     final_rating = _rating(focused_elo, "final")
     warmup_rating = _rating(focused_elo, warmup.policy_id) if warmup else None
     diversity["focused_tournament_elo"] = focused_elo
-    diversity["full_tournament_elo"] = full.elo
+    diversity["full_tournament_elo"] = None if full is None else full.elo
     diversity["final_rating"] = final_rating
     diversity["warmup_rating"] = warmup_rating
     diversity["final_minus_warmup_elo"] = (
@@ -594,7 +627,7 @@ def _run_condition(
         {
             "focused": focused.as_dict(),
             "focused_schedule": schedule_as_dict(focused_schedule),
-            "full_population": full.as_dict(),
+            "full_population": None if full is None else full.as_dict(),
             "full_schedule": schedule_as_dict(full_schedule),
             "direct_final_warmup": direct,
         },
@@ -628,6 +661,7 @@ def _run_condition(
         "fixed_final_update": updates,
         "focused_schedule_games": len(focused_schedule),
         "full_schedule_games": len(full_schedule),
+        "full_tournament_skipped": not run_full_tournament,
         "tournament_workers": workers,
         "seat_balanced": True,
         "observation": observation_value,
@@ -649,7 +683,7 @@ def _run_condition(
             diversity, "mean_pairwise_action_disagreement"
         ),
         "focused_tournament": focused.elo,
-        "full_tournament": full.elo,
+        "full_tournament": None if full is None else full.elo,
         "direct_final_warmup": direct,
         "observation": observation_value,
     }
@@ -951,15 +985,30 @@ def main() -> None:
         default="screening",
     )
     parser.add_argument(
+        "--training-reward",
+        choices=("sparse_win", "potential_win", "round_score"),
+        default=None,
+        help="Override the training reward while keeping evaluation on sparse_win.",
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("artifacts/phase7-follow-up-stability"),
+        default=None,
     )
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument(
+        "--skip-full-population-tournament",
+        action="store_true",
+        help=(
+            "skip the combinatorial full-population tournament while retaining "
+            "focused final/warmup evaluation"
+        ),
+    )
     args = parser.parse_args()
     root = load_config(args.config)
+    output_root = args.output_root or Path("artifacts") / str(root["experiment"])
     stage = _stage_config(root, args.stage)
     seeds = _ints(stage["seeds"], f"{args.stage}.seeds")
     updates = int(stage["updates"])
@@ -985,8 +1034,11 @@ def main() -> None:
         focused_games = 1
         full_games = 1
         workers = 1
+    training_override = (
+        {"reward": args.training_reward} if args.training_reward is not None else None
+    )
     if args.stage == "mappo":
-        confirmation_path = args.output_root / "confirmation-summary.json"
+        confirmation_path = output_root / "confirmation-summary.json"
         if not args.smoke and not confirmation_path.is_file():
             raise ValueError(
                 "MAPPO requires a completed stability confirmation summary"
@@ -1000,7 +1052,7 @@ def main() -> None:
             stable = _mapping(gates.get("stable_adaptation", {}), "stable gate")
             if stable.get("passed") is not True:
                 _write_json(
-                    args.output_root / "mappo-decision.json",
+                    output_root / "mappo-decision.json",
                     {
                         "decision": "deferred",
                         "reason": (
@@ -1013,7 +1065,7 @@ def main() -> None:
         mappo_stage = _stage_config(root, "mappo")
         mappo_rows = _run_mappo(
             root,
-            args.output_root,
+            output_root,
             seeds=_ints(mappo_stage["seeds"], "mappo.seeds")[: len(seeds)],
             updates=updates,
             games=games,
@@ -1021,7 +1073,7 @@ def main() -> None:
             workers=workers,
         )
         _write_json(
-            args.output_root / "mappo-summary.json",
+            output_root / "mappo-summary.json",
             {
                 "experiment": str(root["experiment"]),
                 "stage": "mappo",
@@ -1029,7 +1081,7 @@ def main() -> None:
             },
         )
         _write_json(
-            args.output_root / "mappo-decision.json",
+            output_root / "mappo-decision.json",
             {"decision": "evaluated", "results": mappo_rows},
         )
         return
@@ -1042,9 +1094,7 @@ def main() -> None:
     rows: list[dict[str, object]] = []
     for condition in conditions:
         for seed in seeds:
-            run_dir = (
-                args.output_root / args.stage / str(condition["name"]) / f"seed-{seed}"
-            )
+            run_dir = output_root / args.stage / str(condition["name"]) / f"seed-{seed}"
             manifest_path = run_dir / "manifest.json"
             if args.resume and manifest_path.is_file():
                 manifest = _mapping(
@@ -1101,13 +1151,15 @@ def main() -> None:
                     root,
                     condition,
                     seed,
-                    args.output_root / args.stage,
+                    output_root / args.stage,
                     updates=updates,
                     games=games,
                     focused_games=focused_games,
                     full_games=full_games,
                     workers=workers,
                     observation_override=observation_override,
+                    training_override=training_override,
+                    run_full_tournament=not args.skip_full_population_tournament,
                 )
             )
     if _fallback_is_required(root, rows):
@@ -1121,7 +1173,7 @@ def main() -> None:
         fallback_rows: list[dict[str, object]] = []
         for seed in seeds:
             fallback_dir = (
-                args.output_root
+                output_root
                 / args.stage
                 / str(fallback_condition["name"])
                 / f"seed-{seed}"
@@ -1181,18 +1233,20 @@ def main() -> None:
                     root,
                     fallback_condition,
                     seed,
-                    args.output_root / args.stage,
+                    output_root / args.stage,
                     updates=updates,
                     games=games,
                     focused_games=focused_games,
                     full_games=full_games,
                     workers=workers,
                     observation_override=str(fallback_values["observation"]),
+                    training_override=training_override,
+                    run_full_tournament=not args.skip_full_population_tournament,
                 )
             )
         rows.extend(fallback_rows)
         _write_json(
-            args.output_root / args.stage / "fallback-decision.json",
+            output_root / args.stage / "fallback-decision.json",
             {
                 "required": True,
                 "reason": (
@@ -1204,15 +1258,15 @@ def main() -> None:
         )
     else:
         _write_json(
-            args.output_root / args.stage / "fallback-decision.json",
+            output_root / args.stage / "fallback-decision.json",
             {"required": False, "condition": None},
         )
     paired = _paired_heldout_comparisons(
-        root, args.output_root / args.stage, rows, games=games
+        root, output_root / args.stage, rows, games=games
     )
     aggregate = _aggregate(root, rows, paired)
     _write_json(
-        args.output_root / f"{args.stage}-summary.json",
+        output_root / f"{args.stage}-summary.json",
         {
             "experiment": str(root["experiment"]),
             "stage": args.stage,
@@ -1224,7 +1278,7 @@ def main() -> None:
         },
     )
     _write_json(
-        args.output_root / "summary.json",
+        output_root / "summary.json",
         {
             "experiment": str(root["experiment"]),
             "stage": args.stage,
