@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 
-from flip7.agents import PPOAgent
+from flip7.agents import PPOAgent, SeparateActorCritic
 from flip7.agents.learned import masked_logits
 from flip7.envs import Flip7AECEnv, ObservationFamily, action_space_size
 from flip7.envs.observations import observation_size
@@ -248,7 +248,10 @@ def policy_behavior(snapshot: SnapshotLike, state_bank: StateBank) -> PolicyBeha
             np.stack([entry.action_mask for entry in state_bank.entries]),
             dtype=torch.bool,
         )
-        logits, _value = network(observations)
+        if isinstance(network, SeparateActorCritic):
+            logits = network.actor_logits(observations)
+        else:
+            logits, _value = network(observations)
         probabilities_tensor = torch.softmax(masked_logits(logits, masks), dim=-1)
         probabilities = probabilities_tensor.cpu().numpy().astype(np.float32)
     actions = np.asarray(cast(Any, np.argmax(probabilities, axis=1)), dtype=np.int64)

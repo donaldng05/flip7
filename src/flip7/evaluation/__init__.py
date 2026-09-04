@@ -13,6 +13,7 @@ from flip7.evaluation.diversity import (
     mean_jensen_shannon_divergence,
     non_transitive_cycles,
     pairwise_behavior_metrics,
+    policy_behavior,
 )
 from flip7.evaluation.follow_up import (
     ScheduledGame,
@@ -79,6 +80,7 @@ __all__ = [
     "masked_action_probabilities",
     "non_transitive_cycles",
     "pairwise_behavior_metrics",
+    "policy_behavior",
     "ScheduledGame",
     "build_paired_schedule",
     "direct_final_warmup_comparison",

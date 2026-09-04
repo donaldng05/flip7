@@ -164,10 +164,13 @@ class SeatBalancedPPOTrainer(PPOTrainer):
         rewards: list[float] = []
         dones: list[bool] = []
         values: list[float] = []
+        seat_ids: list[int] = []
         reset_seeds: list[int] = []
         observation = np.zeros(self.observation_size, dtype=np.float32)
+        last_learner_id = self.config.player_count - 1
 
         for learner_id, quota in enumerate(quotas):
+            last_learner_id = learner_id
             env: Flip7VsOpponentsEnv | None = None
             try:
                 env = self.new_env(requested_learner_id=learner_id)
@@ -181,7 +184,10 @@ class SeatBalancedPPOTrainer(PPOTrainer):
                     ).unsqueeze(0)
                     mask_tensor = torch.as_tensor(mask, dtype=torch.bool).unsqueeze(0)
                     with torch.no_grad():
-                        logits, value = self.network(observation_tensor)
+                        logits, value = self._forward(
+                            observation_tensor,
+                            np.asarray([learner_id], dtype=np.int64),
+                        )
                         distribution = Categorical(
                             logits=masked_logits(logits, mask_tensor)
                         )
@@ -199,6 +205,7 @@ class SeatBalancedPPOTrainer(PPOTrainer):
                     rewards.append(float(reward))
                     dones.append(bool(terminated or truncated))
                     values.append(float(value.item()))
+                    seat_ids.append(learner_id)
                     observation, info = next_observation, next_info
                     if terminated or truncated:
                         env.close()
@@ -214,8 +221,9 @@ class SeatBalancedPPOTrainer(PPOTrainer):
             raise RuntimeError("balanced rollout collected no transitions")
         with torch.no_grad():
             next_value = float(
-                self.network(
-                    torch.as_tensor(observation, dtype=torch.float32).unsqueeze(0)
+                self._forward(
+                    torch.as_tensor(observation, dtype=torch.float32).unsqueeze(0),
+                    np.asarray([last_learner_id], dtype=np.int64),
                 )[1].item()
             )
         self.last_rollout_seat_counts = quotas
@@ -236,6 +244,7 @@ class SeatBalancedPPOTrainer(PPOTrainer):
             np.asarray(dones, dtype=np.bool_),
             np.asarray(values, dtype=np.float32),
             next_value,
+            np.asarray(seat_ids, dtype=np.int64),
         )
 
 
@@ -267,6 +276,7 @@ class StabilityLeaguePPOTrainer(SeatBalancedPPOTrainer):
         history: list[dict[str, float]] = []
         snapshot_dir = checkpoint.parent / "checkpoints"
         for update in range(1, self.config.updates + 1):
+            self._current_update = update
             self.league.set_training_update(update)
             rollout = self.collect_rollout()
             metrics = self.update(rollout)
@@ -346,6 +356,7 @@ class StabilityControlPPOTrainer(SeatBalancedPPOTrainer):
             raise ValueError("StabilityControlPPOTrainer requires a checkpoint path")
         history: list[dict[str, float]] = []
         for update in range(1, self.config.updates + 1):
+            self._current_update = update
             rollout = self.collect_rollout()
             metrics = self.update(rollout)
             metrics["update"] = float(update)
