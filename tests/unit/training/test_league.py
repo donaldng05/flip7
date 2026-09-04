@@ -152,3 +152,18 @@ def test_frozen_snapshot_policy_does_not_accumulate_gradients(tmp_path: Path) ->
 
     assert info["action_mask"][action] == 1
     assert all(parameter.grad is None for parameter in policy.network.parameters())
+
+
+def test_frozen_snapshot_policy_can_be_reseeded_per_episode() -> None:
+    from flip7.agents import ActorCritic, PPOAgent
+
+    policy = PPOAgent(ActorCritic(33, 5, 8), deterministic=False, seed=1)
+    observation = np.zeros(33, dtype=np.float32)
+    mask = np.ones(5, dtype=np.int8)
+
+    policy.reseed(12)
+    first = [policy(observation, mask) for _ in range(4)]
+    policy.reseed(12)
+    second = [policy(observation, mask) for _ in range(4)]
+
+    assert first == second

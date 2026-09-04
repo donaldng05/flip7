@@ -34,6 +34,84 @@ class ActorCritic(nn.Module):
         return self.actor(features), self.critic(features).squeeze(-1)
 
 
+class SeparateActorCritic(nn.Module):
+    """Actor-critic with independent actor and value feature extractors.
+
+    The stable follow-up recipe uses this model so value-function fitting cannot
+    reshape the actor representation directly.  ``critic_context_size`` is
+    reserved for public context such as the learner seat; it is not consumed by
+    the actor.
+    """
+
+    def __init__(
+        self,
+        observation_size: int,
+        action_size: int,
+        hidden_size: int = 128,
+        critic_context_size: int = 0,
+    ) -> None:
+        super().__init__()
+        if critic_context_size < 0:
+            raise ValueError("critic_context_size must be non-negative")
+        self.critic_context_size = critic_context_size
+        self.actor_body = nn.Sequential(
+            nn.Linear(observation_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+        )
+        self.critic_body = nn.Sequential(
+            nn.Linear(observation_size + critic_context_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+        )
+        self.actor = nn.Linear(hidden_size, action_size)
+        self.critic = nn.Linear(hidden_size, 1)
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        for module in self.actor_body:
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight)
+                nn.init.zeros_(module.bias)
+        for module in self.critic_body:
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight)
+                nn.init.zeros_(module.bias)
+        nn.init.orthogonal_(self.actor.weight, gain=0.01)
+        nn.init.zeros_(self.actor.bias)
+        nn.init.orthogonal_(self.critic.weight)
+        nn.init.zeros_(self.critic.bias)
+
+    def forward(
+        self, observations: Tensor, critic_context: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        if self.critic_context_size:
+            if critic_context is None:
+                raise ValueError("critic context is required for this network")
+            if (
+                critic_context.ndim != 2
+                or critic_context.shape[0] != observations.shape[0]
+            ):
+                raise ValueError("critic context must align with observation batches")
+            critic_input = torch.cat((observations, critic_context), dim=-1)
+        else:
+            if critic_context is not None:
+                raise ValueError("critic context is not configured for this network")
+            critic_input = observations
+        return self.actor(self.actor_body(observations)), self.critic(
+            self.critic_body(critic_input)
+        ).squeeze(-1)
+
+    def actor_logits(self, observations: Tensor) -> Tensor:
+        """Return policy logits without requiring value-function context."""
+        return self.actor(self.actor_body(observations))
+
+
+PolicyNetwork = ActorCritic | SeparateActorCritic
+
+
 def masked_logits(logits: Tensor, action_masks: Tensor) -> Tensor:
     """Make invalid actions impossible while preserving valid logits."""
     if logits.shape != action_masks.shape:
@@ -48,7 +126,7 @@ class PPOAgent:
 
     def __init__(
         self,
-        network: ActorCritic,
+        network: PolicyNetwork,
         *,
         deterministic: bool = False,
         seed: int | None = None,
@@ -68,7 +146,10 @@ class PPOAgent:
             action_mask, dtype=torch.bool, device=self.device
         ).unsqueeze(0)
         with torch.no_grad():
-            logits, _ = self.network(observation_tensor)
+            if isinstance(self.network, SeparateActorCritic):
+                logits = self.network.actor_logits(observation_tensor)
+            else:
+                logits, _ = self.network(observation_tensor)
             legal_logits = masked_logits(logits, mask_tensor)
             if self.deterministic:
                 return int(torch.argmax(legal_logits, dim=-1).item())
@@ -76,6 +157,10 @@ class PPOAgent:
             return int(
                 torch.multinomial(probabilities, 1, generator=self._generator).item()
             )
+
+    def reseed(self, seed: int) -> None:
+        """Reset stochastic inference for a new explicitly seeded episode."""
+        self._generator.manual_seed(seed)
 
     @classmethod
     def from_checkpoint(
@@ -90,11 +175,22 @@ class PPOAgent:
             path, map_location=device, weights_only=False
         )
         config = payload["config"]
-        network = ActorCritic(
-            config["observation_size"],
-            config["action_size"],
-            config["hidden_size"],
-        )
+        network_name = config.get("network", "shared")
+        if network_name == "separate":
+            network: PolicyNetwork = SeparateActorCritic(
+                config["observation_size"],
+                config["action_size"],
+                config["hidden_size"],
+                int(config.get("critic_context_size", 0)),
+            )
+        elif network_name == "shared":
+            network = ActorCritic(
+                config["observation_size"],
+                config["action_size"],
+                config["hidden_size"],
+            )
+        else:
+            raise ValueError(f"unsupported checkpoint network: {network_name}")
         network.load_state_dict(payload["model_state"])
         return cls(network, deterministic=deterministic, seed=seed, device=device)
 
@@ -106,4 +202,11 @@ def seed_torch(seed: int) -> None:
     np.random.seed(seed)
 
 
-__all__ = ["ActorCritic", "PPOAgent", "masked_logits", "seed_torch"]
+__all__ = [
+    "ActorCritic",
+    "PPOAgent",
+    "PolicyNetwork",
+    "SeparateActorCritic",
+    "masked_logits",
+    "seed_torch",
+]

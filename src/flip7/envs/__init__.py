@@ -17,7 +17,11 @@ from flip7.envs.observations import (
     encode_observation,
     observation_size,
 )
-from flip7.envs.rewards import RewardMode, rewards_from_result
+from flip7.envs.rewards import (
+    RewardMode,
+    rewards_from_result,
+    score_differential_potential,
+)
 from flip7.envs.vs_opponents import Flip7VsOpponentsEnv, RandomLegalPolicy
 
 __all__ = [
@@ -38,4 +42,5 @@ __all__ = [
     "observation_size",
     "player_id_from_agent",
     "rewards_from_result",
+    "score_differential_potential",
 ]

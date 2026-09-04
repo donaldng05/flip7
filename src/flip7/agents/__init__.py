@@ -8,7 +8,13 @@ from flip7.agents.baselines import (
     RandomLegalAgent,
     RoundDPAgent,
 )
-from flip7.agents.learned import ActorCritic, PPOAgent, masked_logits, seed_torch
+from flip7.agents.learned import (
+    ActorCritic,
+    PPOAgent,
+    SeparateActorCritic,
+    masked_logits,
+    seed_torch,
+)
 
 __all__ = [
     "ActionMask",
@@ -20,6 +26,7 @@ __all__ = [
     "FixedThresholdAgent",
     "Observation",
     "PPOAgent",
+    "SeparateActorCritic",
     "RandomLegalAgent",
     "RoundDPAgent",
     "masked_logits",

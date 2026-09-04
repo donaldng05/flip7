@@ -166,6 +166,26 @@ latest-snapshot ablation using held-out opponent variants and seat-rotated
 tournaments with Elo. MAPPO remains evidence-gated until centralized-critic
 credit assignment is justified by the league results.
 
+The Phase 7 follow-up strengthens that evidence boundary with fixed-bank
+behavioural diversity metrics, novelty-aware retention, paired multi-game
+tournaments, five-seed confirmation, and a targeted MAPPO pilot. Phase 8
+should begin only after the population-diversity and stable-adaptation gates
+are reported, with MAPPO adopted, deferred, or explicitly sent to another
+focused investigation.
+
+The stability follow-up adds deterministic seat-balanced rollouts, a gradual
+opponent curriculum, training-only response signatures, paired held-out
+comparisons, and focused final-versus-warmup tournaments. Its seat-aware
+fallback and MAPPO pilot remain gated by the balanced-basic confirmation
+results.
+
+The stronger-recipe follow-up is still Phase 7 completion work. It addresses
+the observed PPO entropy collapse and sparse-reward credit-assignment limits
+with an opt-in separate actor/critic recipe, a seat-conditioned value function,
+scheduled regularization, and a public-state potential-reward ablation. Phase 8
+remains gated on the resulting per-seed strength, seat-robustness, diversity,
+and tournament-adaptation evidence.
+
 ---
 
 ### Phase 8 — Robustness & Generalization

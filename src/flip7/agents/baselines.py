@@ -139,27 +139,42 @@ class RoundDPAgent:
         return first_legal(action_mask, action)
 
 
-@lru_cache(maxsize=32_768)
+_NUMBER_MASK_SUMS = tuple(
+    sum(value for value in range(13) if mask & (1 << value)) for mask in range(1 << 13)
+)
+
+
 def _continuation_value(
     counts: tuple[int, ...], held: tuple[int, ...], max_unique_numbers: int
 ) -> float:
-    """Expected future number value, stopping when the modeled hand is full."""
+    """Expected future number value, stopping when the modeled hand is full.
+
+    The helper signature remains tuple-based for compatibility; recursion uses
+    a bitmask so it avoids rebuilding sets and sorting tuples at every draw.
+    """
+    held_mask = sum(1 << value for value in held)
+    return _continuation_value_mask(counts, held_mask, max_unique_numbers)
+
+
+@lru_cache(maxsize=32_768)
+def _continuation_value_mask(
+    counts: tuple[int, ...], held_mask: int, max_unique_numbers: int
+) -> float:
+    """Memoized continuation value using an integer held-number bitmask."""
     total = sum(counts)
-    if not total or len(held) >= max_unique_numbers:
-        return float(sum(held))
-    held_set = set(held)
+    if not total or held_mask.bit_count() >= max_unique_numbers:
+        return float(_NUMBER_MASK_SUMS[held_mask])
     expected = 0.0
     for value, count in enumerate(counts):
         if not count:
             continue
         next_counts = list(counts)
         next_counts[value] -= 1
-        if value in held_set:
+        if held_mask & (1 << value):
             outcome = 0.0
         else:
-            next_held = tuple(sorted((*held, value)))
-            outcome = _continuation_value(
-                tuple(next_counts), next_held, max_unique_numbers
+            outcome = _continuation_value_mask(
+                tuple(next_counts), held_mask | (1 << value), max_unique_numbers
             )
         expected += count / total * outcome
     return expected
