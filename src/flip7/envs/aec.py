@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Iterable, Sequence
 from typing import Any, cast
@@ -47,6 +48,7 @@ class Flip7AECEnv(AECEnv[AgentID, Observation, int | None]):
         *,
         observation: ObservationFamily | str = ObservationFamily.COMPETITIVE,
         reward: RewardMode | str = RewardMode.SPARSE_WIN,
+        potential_gamma: float = 0.99,
     ) -> None:
         super().__init__()
         if not 3 <= player_count <= 18:
@@ -56,6 +58,9 @@ class Flip7AECEnv(AECEnv[AgentID, Observation, int | None]):
         self.player_count = player_count
         self.observation_family = ObservationFamily(observation)
         self.reward_mode = RewardMode(reward)
+        if not 0.0 < potential_gamma <= 1.0 or not math.isfinite(potential_gamma):
+            raise ValueError("potential_gamma must be in (0, 1]")
+        self.potential_gamma = potential_gamma
         self.possible_agents = [
             agent_name(player_id) for player_id in range(player_count)
         ]
@@ -135,11 +140,18 @@ class Flip7AECEnv(AECEnv[AgentID, Observation, int | None]):
         agent = self.agent_selection
         player_id = player_id_from_agent(agent)
         decoded = decode_action(action, self.engine.state, player_id)
+        previous_state = self.engine.state
         result = self.engine.apply(decoded)
 
         self._cumulative_rewards[agent] = 0
         self._clear_rewards()
-        assigned = rewards_from_result(result, self.player_count, self.reward_mode)
+        assigned = rewards_from_result(
+            result,
+            self.player_count,
+            self.reward_mode,
+            previous_state=previous_state,
+            potential_discount=self.potential_gamma,
+        )
         for reward_player_id, reward in assigned.items():
             self.rewards[agent_name(reward_player_id)] = reward
 
