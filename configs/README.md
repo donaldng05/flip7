@@ -34,3 +34,13 @@ response-diverse retention comparison, paired held-out evaluation, focused
 adaptation tournament, and gated MAPPO stage. Use
 `scripts/run_phase7_follow_up_stability.py`; outputs are isolated under
 `artifacts/phase7-follow-up-stability/`.
+
+`phase7-follow-up-stability-recipe.yaml` contains the opt-in stronger PPO
+recipe: separate actor and critic features, a seat-conditioned value function,
+scheduled learning rate and entropy, value clipping, KL diagnostics, and a
+100-update screening budget. It uses the same stability runner and defaults to
+the sparse-win evaluation protocol. Add `--training-reward potential_win` and
+use a separate output root for the training-only potential-reward ablation.
+For CPU screening, `--skip-full-population-tournament` omits only the
+combinatorial secondary tournament; focused adaptation and all policy
+evaluation remain enabled.

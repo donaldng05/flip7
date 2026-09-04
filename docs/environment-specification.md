@@ -111,6 +111,9 @@ One episode is one game to the 200-point threshold.
 
 - `sparse_win` (default): `0` until `GAME_ENDED`; each winner receives `1 / k`.
 - `round_score`: also add each recorded round score / 200.
+- `potential_win`: retain the terminal sparse-win reward and add the discounted
+  delta of the bounded public score-differential potential. This mode is for
+  training experiments; sparse-win remains the evaluation objective.
 
 There is no truncation limit in Phase 3.
 

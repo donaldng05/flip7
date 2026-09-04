@@ -33,6 +33,41 @@ If the balanced `basic` response-diverse policy fails baseline strength or
 seat-spread gates, the runner automatically evaluates one `seat_aware`
 fallback. The fallback is not evaluated or promoted when balanced-basic passes.
 
+## Stronger learning-recipe follow-up
+
+The original stability recipe is an experimental control, not a claim that the
+PPO optimizer is sufficient. The opt-in recipe in
+`configs/phase7-follow-up-stability-recipe.yaml` addresses the observed entropy
+collapse by using independent actor and critic features, a seat-conditioned
+critic, orthogonal initialization, scheduled learning rate and entropy, value
+clipping, and target-KL diagnostics. It retains the `basic` actor observation
+and equal seat quotas so improvements can be attributed to training rather than
+an observation rewrite.
+
+The default recipe trains on `sparse_win`. A matched training-only
+`potential_win` ablation uses the bounded public score-differential potential
+delta while all evaluation remains sparse-win. The potential is not used for
+held-out selection and is never part of the Phase 6/7 control paths.
+
+Run the stronger sparse-reward screen with:
+
+```powershell
+uv run python scripts/run_phase7_follow_up_stability.py `
+  --config configs/phase7-follow-up-stability-recipe.yaml `
+  --stage screening `
+  --output-root artifacts/phase7-follow-up-stability-recipe
+```
+
+Run the matched potential-reward screen in a separate namespace with:
+
+```powershell
+uv run python scripts/run_phase7_follow_up_stability.py `
+  --config configs/phase7-follow-up-stability-recipe.yaml `
+  --stage screening `
+  --training-reward potential_win `
+  --output-root artifacts/phase7-follow-up-stability-recipe-potential
+```
+
 ## Evaluation protocol
 
 Held-out comparisons use common game-seed blocks and report paired game-level
@@ -50,6 +85,11 @@ Run screening with:
 ```powershell
 uv run python scripts/run_phase7_follow_up_stability.py --stage screening --workers 8
 ```
+
+On CPU, the full-population tournament can become combinatorial once twelve
+learned snapshots are retained. Use `--skip-full-population-tournament` for a
+screening run when focused final-versus-warmup tournament results are enough;
+the default still runs the full secondary diagnostic.
 
 Run confirmation after screening with:
 
