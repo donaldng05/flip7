@@ -23,6 +23,63 @@ def test_compute_gae_resets_at_terminal_transitions() -> None:
     assert np.allclose(returns, [1.0, 2.0])
 
 
+def test_compute_gae_resets_at_independent_segment_boundaries() -> None:
+    advantages, returns = compute_gae(
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+        np.zeros(4, dtype=np.bool_),
+        np.zeros(4, dtype=np.float32),
+        0.0,
+        gamma=1.0,
+        gae_lambda=1.0,
+        segment_ends=np.array([False, True, False, True], dtype=np.bool_),
+        segment_next_values=np.array([0.0, 10.0, 0.0, 20.0], dtype=np.float32),
+    )
+
+    assert np.allclose(advantages, [13.0, 12.0, 27.0, 24.0])
+    assert np.allclose(returns, advantages)
+
+
+def test_compute_gae_requires_aligned_segment_metadata() -> None:
+    with pytest.raises(ValueError, match="supplied together"):
+        compute_gae(
+            np.ones(2, dtype=np.float32),
+            np.zeros(2, dtype=np.bool_),
+            np.zeros(2, dtype=np.float32),
+            0.0,
+            gamma=0.99,
+            gae_lambda=0.95,
+            segment_ends=np.array([True, True], dtype=np.bool_),
+        )
+
+    with pytest.raises(ValueError, match="align"):
+        compute_gae(
+            np.ones(2, dtype=np.float32),
+            np.zeros(2, dtype=np.bool_),
+            np.zeros(2, dtype=np.float32),
+            0.0,
+            gamma=0.99,
+            gae_lambda=0.95,
+            segment_ends=np.array([True, True], dtype=np.bool_),
+            segment_next_values=np.array([0.0], dtype=np.float32),
+        )
+
+
+def test_compute_gae_segment_boundary_preserves_terminal_masking() -> None:
+    advantages, returns = compute_gae(
+        np.array([1.0, 2.0], dtype=np.float32),
+        np.array([True, False], dtype=np.bool_),
+        np.zeros(2, dtype=np.float32),
+        0.0,
+        gamma=1.0,
+        gae_lambda=1.0,
+        segment_ends=np.array([True, True], dtype=np.bool_),
+        segment_next_values=np.array([99.0, 3.0], dtype=np.float32),
+    )
+
+    assert np.allclose(advantages, [1.0, 5.0])
+    assert np.allclose(returns, [1.0, 5.0])
+
+
 def _small_config() -> PPOConfig:
     return PPOConfig(
         seed=13,
