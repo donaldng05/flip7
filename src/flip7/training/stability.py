@@ -1,0 +1,385 @@
+"""Seat-balanced PPO training for the Phase 7 stability follow-up."""
+
+from __future__ import annotations
+
+import random
+from collections.abc import Callable
+from pathlib import Path
+from typing import cast
+
+import numpy as np
+import torch
+from torch import Tensor
+from torch.distributions import Categorical
+
+from flip7.agents import Agent, PPOAgent
+from flip7.agents.learned import masked_logits
+from flip7.envs import Flip7VsOpponentsEnv, ObservationFamily, agent_name
+from flip7.training.league import baseline_factories
+from flip7.training.league_followup import (
+    DiversePolicyLeague,
+    FollowUpLeagueConfig,
+    write_followup_population,
+)
+from flip7.training.ppo import (
+    EpisodeLineup,
+    PPOConfig,
+    PPOTrainer,
+    Rollout,
+    write_history,
+)
+
+type SeatLineupProvider = Callable[[random.Random, int, int], EpisodeLineup]
+
+
+def training_response_signature(
+    checkpoint: Path,
+    *,
+    observation: ObservationFamily,
+    baseline_names: tuple[str, ...],
+    games: int,
+    seed: int,
+) -> tuple[float, ...]:
+    """Measure a checkpoint against training-only baseline matchups.
+
+    The imports are local so the evaluation package can continue importing the
+    training package without creating an import cycle.
+    """
+    if games < 1:
+        raise ValueError("response signature games must be positive")
+    from flip7.evaluation.phase6 import PHASE6_MATCHUPS, run_rotated_matchups
+
+    matchups = tuple(
+        pair for pair in PHASE6_MATCHUPS if set(pair).issubset(baseline_names)
+    )
+    if not matchups:
+        raise ValueError("baseline roster has no supported training matchups")
+    policy_instance: PPOAgent | None = None
+
+    def policy() -> PPOAgent:
+        nonlocal policy_instance
+        if policy_instance is None:
+            policy_instance = PPOAgent.from_checkpoint(checkpoint, deterministic=True)
+        return policy_instance
+
+    results = run_rotated_matchups(
+        policy,
+        baseline_factories(),
+        games=games,
+        seed_bases=tuple(seed + index * 10_000 for index in range(len(matchups))),
+        observation=observation,
+        matchups=matchups,
+    )
+    signature: list[float] = []
+    for result in results:
+        means = result.mean(result.win_share)
+        signature.append(float(means["ppo"]))
+    return tuple(signature)
+
+
+def balanced_seat_quotas(steps: int, player_count: int) -> tuple[int, ...]:
+    """Return deterministic, maximally equal transition quotas per seat."""
+    if steps < 1:
+        raise ValueError("rollout steps must be positive")
+    if player_count < 1:
+        raise ValueError("player count must be positive")
+    base, remainder = divmod(steps, player_count)
+    return tuple(base + int(seat < remainder) for seat in range(player_count))
+
+
+class BalancedBaselineProvider:
+    """Build baseline-only lineups for an explicitly requested learner seat."""
+
+    def __init__(self, names: tuple[str, ...]) -> None:
+        if not names:
+            raise ValueError("at least one baseline opponent is required")
+        available = baseline_factories()
+        missing = set(names) - set(available)
+        if missing:
+            raise ValueError(f"unknown baseline opponents: {sorted(missing)}")
+        self.names = names
+
+    def episode_lineup(
+        self,
+        rng: random.Random,
+        player_count: int,
+        learner_id: int | None = None,
+    ) -> EpisodeLineup:
+        if learner_id is None:
+            learner_id = rng.randrange(player_count)
+        if not 0 <= learner_id < player_count:
+            raise ValueError("learner_id must reference a seated player")
+        selected = rng.choice(self.names)
+        policy_seed = rng.randrange(2**31)
+        factory = baseline_factories(random_seed=policy_seed)[selected]
+        opponents: dict[str, Agent] = {
+            agent_name(seat): factory()
+            for seat in range(player_count)
+            if seat != learner_id
+        }
+        observations = {
+            agent_name(seat): ObservationFamily.DECK_AWARE
+            for seat in range(player_count)
+            if seat != learner_id
+        }
+        return EpisodeLineup(learner_id, opponents, observations)
+
+    def episode_lineup_for_seat(
+        self, rng: random.Random, player_count: int, learner_id: int
+    ) -> EpisodeLineup:
+        return self.episode_lineup(rng, player_count, learner_id)
+
+
+class SeatBalancedPPOTrainer(PPOTrainer):
+    """PPO trainer whose rollout transitions are balanced across learner seats."""
+
+    def __init__(
+        self,
+        config: PPOConfig,
+        *,
+        opponent_provider: Callable[[random.Random, int], EpisodeLineup],
+        seat_opponent_provider: SeatLineupProvider,
+    ) -> None:
+        self.last_rollout_seat_counts: tuple[int, ...] = ()
+        self.last_rollout_reset_seeds: tuple[int, ...] = ()
+        self.rollout_schedule: list[dict[str, object]] = []
+        if config.rollout_steps < config.player_count:
+            raise ValueError("rollout steps must cover every learner seat")
+        super().__init__(
+            config,
+            opponent_names=("random",),
+            opponent_provider=opponent_provider,
+            seat_opponent_provider=seat_opponent_provider,
+        )
+
+    def collect_rollout(self) -> Rollout:
+        """Collect equal-as-possible transition blocks for each learner seat."""
+        quotas = balanced_seat_quotas(
+            self.config.rollout_steps, self.config.player_count
+        )
+        observations: list[np.ndarray] = []
+        masks: list[np.ndarray] = []
+        actions: list[int] = []
+        old_log_probs: list[float] = []
+        rewards: list[float] = []
+        dones: list[bool] = []
+        values: list[float] = []
+        seat_ids: list[int] = []
+        reset_seeds: list[int] = []
+        observation = np.zeros(self.observation_size, dtype=np.float32)
+        last_learner_id = self.config.player_count - 1
+
+        for learner_id, quota in enumerate(quotas):
+            last_learner_id = learner_id
+            env: Flip7VsOpponentsEnv | None = None
+            try:
+                env = self.new_env(requested_learner_id=learner_id)
+                reset_seed = self._rng.randrange(2**31)
+                reset_seeds.append(reset_seed)
+                observation, info = env.reset(seed=reset_seed)
+                for _ in range(quota):
+                    mask = info["action_mask"]
+                    observation_tensor = torch.as_tensor(
+                        observation, dtype=torch.float32
+                    ).unsqueeze(0)
+                    mask_tensor = torch.as_tensor(mask, dtype=torch.bool).unsqueeze(0)
+                    with torch.no_grad():
+                        logits, value = self._forward(
+                            observation_tensor,
+                            np.asarray([learner_id], dtype=np.int64),
+                        )
+                        distribution = Categorical(
+                            logits=masked_logits(logits, mask_tensor)
+                        )
+                        action_tensor: Tensor = distribution.sample()
+                    action = int(cast(float, action_tensor.item()))
+                    next_observation, reward, terminated, truncated, next_info = (
+                        env.step(action)
+                    )
+                    observations.append(observation.copy())
+                    masks.append(mask.copy())
+                    actions.append(action)
+                    old_log_probs.append(
+                        float(cast(Tensor, distribution.log_prob(action_tensor)).item())
+                    )
+                    rewards.append(float(reward))
+                    dones.append(bool(terminated or truncated))
+                    values.append(float(value.item()))
+                    seat_ids.append(learner_id)
+                    observation, info = next_observation, next_info
+                    if terminated or truncated:
+                        env.close()
+                        env = self.new_env(requested_learner_id=learner_id)
+                        reset_seed = self._rng.randrange(2**31)
+                        reset_seeds.append(reset_seed)
+                        observation, info = env.reset(seed=reset_seed)
+            finally:
+                if env is not None:
+                    env.close()
+
+        if not observations:
+            raise RuntimeError("balanced rollout collected no transitions")
+        with torch.no_grad():
+            next_value = float(
+                self._forward(
+                    torch.as_tensor(observation, dtype=torch.float32).unsqueeze(0),
+                    np.asarray([last_learner_id], dtype=np.int64),
+                )[1].item()
+            )
+        self.last_rollout_seat_counts = quotas
+        self.last_rollout_reset_seeds = tuple(reset_seeds)
+        self.rollout_schedule.append(
+            {
+                "rollout": len(self.rollout_schedule) + 1,
+                "seat_quotas": list(quotas),
+                "reset_seeds": list(reset_seeds),
+            }
+        )
+        return Rollout(
+            np.asarray(observations, dtype=np.float32),
+            np.asarray(masks, dtype=np.int8),
+            np.asarray(actions, dtype=np.int64),
+            np.asarray(old_log_probs, dtype=np.float32),
+            np.asarray(rewards, dtype=np.float32),
+            np.asarray(dones, dtype=np.bool_),
+            np.asarray(values, dtype=np.float32),
+            next_value,
+            np.asarray(seat_ids, dtype=np.int64),
+        )
+
+
+class StabilityLeaguePPOTrainer(SeatBalancedPPOTrainer):
+    """Train a league policy with balanced seats and a gradual opponent curriculum."""
+
+    def __init__(
+        self,
+        config: PPOConfig,
+        *,
+        league_config: FollowUpLeagueConfig,
+    ) -> None:
+        self.league = DiversePolicyLeague(
+            league_config,
+            observation=ObservationFamily(config.observation),
+            source_seed=config.seed,
+            player_count=config.player_count,
+        )
+        super().__init__(
+            config,
+            opponent_provider=self.league.episode_lineup,
+            seat_opponent_provider=self.league.episode_lineup_for_seat,
+        )
+
+    def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
+        """Train and archive snapshots using the fixed final update contract."""
+        if checkpoint is None:
+            raise ValueError("StabilityLeaguePPOTrainer requires a checkpoint path")
+        history: list[dict[str, float]] = []
+        snapshot_dir = checkpoint.parent / "checkpoints"
+        for update in range(1, self.config.updates + 1):
+            self._current_update = update
+            self.league.set_training_update(update)
+            rollout = self.collect_rollout()
+            metrics = self.update(rollout)
+            metrics["update"] = float(update)
+            metrics["mean_reward"] = float(rollout.rewards.mean())
+            self.save_checkpoint(checkpoint, update)
+            if update >= self.league.config.warmup_updates and (
+                update == self.league.config.warmup_updates
+                or (update - self.league.config.warmup_updates)
+                % self.league.config.archive_interval
+                == 0
+            ):
+                snapshot_path = snapshot_dir / f"update-{update:04d}.pt"
+                self.save_checkpoint(
+                    snapshot_path,
+                    update,
+                    metadata={
+                        "policy_id": f"seed-{self.config.seed}-update-{update:04d}",
+                        "source_seed": self.config.seed,
+                        "snapshot_update": update,
+                        "observation": self.config.observation,
+                        "observation_size": self.observation_size,
+                        "action_size": self.action_size,
+                    },
+                )
+                response_signature = None
+                if self.league.config.response_signature_games > 0:
+                    response_signature = training_response_signature(
+                        snapshot_path,
+                        observation=ObservationFamily(self.config.observation),
+                        baseline_names=self.league.config.baseline_names,
+                        games=self.league.config.response_signature_games,
+                        seed=self.config.seed * 100_000 + update,
+                    )
+                self.league.register_snapshot(
+                    snapshot_path,
+                    update=update,
+                    seed=self.config.seed,
+                    response_signature=response_signature,
+                )
+            metrics.update(
+                {
+                    "population_size": float(len(self.league.snapshots)),
+                    "archived_population_size": float(
+                        len(self.league.archived_snapshots)
+                    ),
+                    "learned_opponent_probability": self.league.learned_probability,
+                    "seat_0_transitions": float(self.last_rollout_seat_counts[0]),
+                    "seat_1_transitions": float(self.last_rollout_seat_counts[1]),
+                    "seat_2_transitions": float(self.last_rollout_seat_counts[2]),
+                }
+            )
+            total = sum(self.league.exposure.values())
+            learned = sum(
+                count
+                for key, count in self.league.exposure.items()
+                if key.startswith("snapshot:")
+            )
+            metrics["learned_opponent_share"] = learned / total if total else 0.0
+            history.append(metrics)
+        return history
+
+
+class StabilityControlPPOTrainer(SeatBalancedPPOTrainer):
+    """Train a balanced baseline-only control with the same PPO recipe."""
+
+    def __init__(self, config: PPOConfig, baseline_names: tuple[str, ...]) -> None:
+        provider = BalancedBaselineProvider(baseline_names)
+        super().__init__(
+            config,
+            opponent_provider=lambda rng, count: provider.episode_lineup(rng, count),
+            seat_opponent_provider=provider.episode_lineup_for_seat,
+        )
+
+    def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
+        if checkpoint is None:
+            raise ValueError("StabilityControlPPOTrainer requires a checkpoint path")
+        history: list[dict[str, float]] = []
+        for update in range(1, self.config.updates + 1):
+            self._current_update = update
+            rollout = self.collect_rollout()
+            metrics = self.update(rollout)
+            metrics["update"] = float(update)
+            metrics["mean_reward"] = float(rollout.rewards.mean())
+            self.save_checkpoint(checkpoint, update)
+            metrics.update(
+                {
+                    "seat_0_transitions": float(self.last_rollout_seat_counts[0]),
+                    "seat_1_transitions": float(self.last_rollout_seat_counts[1]),
+                    "seat_2_transitions": float(self.last_rollout_seat_counts[2]),
+                }
+            )
+            history.append(metrics)
+        return history
+
+
+__all__ = [
+    "BalancedBaselineProvider",
+    "SeatBalancedPPOTrainer",
+    "StabilityControlPPOTrainer",
+    "StabilityLeaguePPOTrainer",
+    "balanced_seat_quotas",
+    "training_response_signature",
+    "write_followup_population",
+    "write_history",
+]

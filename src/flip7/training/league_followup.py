@@ -40,6 +40,13 @@ class FollowUpLeagueConfig:
     retention_strategy: str = "novelty"
     state_bank_size: int = 2_048
     state_bank_seed: int = 70_000
+    learned_opponent_probability_start: float | None = None
+    learned_opponent_probability_end: float | None = None
+    learned_opponent_ramp_updates: int = 0
+    baseline_floor: float = 0.0
+    warmup_anchor_probability: float = 0.0
+    response_signature_weight: float = 0.0
+    response_signature_games: int = 0
 
     def __post_init__(self) -> None:
         if self.warmup_updates < 0:
@@ -50,6 +57,34 @@ class FollowUpLeagueConfig:
             raise ValueError("max_population must be positive")
         if not 0.0 <= self.learned_opponent_probability <= 1.0:
             raise ValueError("learned_opponent_probability must be between 0 and 1")
+        if (
+            self.learned_opponent_probability_start is not None
+            and not 0.0 <= (self.learned_opponent_probability_start) <= 1.0
+        ):
+            raise ValueError(
+                "learned_opponent_probability_start must be between 0 and 1"
+            )
+        if (
+            self.learned_opponent_probability_end is not None
+            and not 0.0 <= (self.learned_opponent_probability_end) <= 1.0
+        ):
+            raise ValueError("learned_opponent_probability_end must be between 0 and 1")
+        if (self.learned_opponent_probability_start is None) != (
+            self.learned_opponent_probability_end is None
+        ):
+            raise ValueError(
+                "learned opponent ramp requires both start and end probabilities"
+            )
+        if self.learned_opponent_ramp_updates < 0:
+            raise ValueError("learned_opponent_ramp_updates must be non-negative")
+        if not 0.0 <= self.baseline_floor <= 1.0:
+            raise ValueError("baseline_floor must be between 0 and 1")
+        if not 0.0 <= self.warmup_anchor_probability <= 1.0:
+            raise ValueError("warmup_anchor_probability must be between 0 and 1")
+        if not 0.0 <= self.response_signature_weight <= 1.0:
+            raise ValueError("response_signature_weight must be between 0 and 1")
+        if self.response_signature_games < 0:
+            raise ValueError("response_signature_games must be non-negative")
         if self.retention_strategy not in {"latest", "temporal", "novelty"}:
             raise ValueError("retention_strategy must be latest, temporal, or novelty")
         if self.state_bank_size < 1:
@@ -94,6 +129,8 @@ class DiversePolicyLeague:
         self._warmup_anchor: PolicySnapshot | None = None
         self._exposure: Counter[str] = Counter()
         self._policy_cache: dict[str, PPOAgent] = {}
+        self._training_update = 0
+        self._response_signatures: dict[str, tuple[float, ...]] = {}
 
     @property
     def snapshots(self) -> tuple[PolicySnapshot, ...]:
@@ -117,11 +154,35 @@ class DiversePolicyLeague:
     def exposure(self) -> Mapping[str, int]:
         return dict(self._exposure)
 
-    def episode_lineup(self, rng: random.Random, player_count: int) -> EpisodeLineup:
+    @property
+    def response_signatures(self) -> Mapping[str, tuple[float, ...]]:
+        """Return training-roster response signatures for archived policies."""
+        return dict(self._response_signatures)
+
+    @property
+    def learned_probability(self) -> float:
+        """Return the current curriculum probability for learned opponents."""
+        return self._learned_probability()
+
+    def set_training_update(self, update: int) -> None:
+        """Set the update used by the optional opponent curriculum."""
+        if update < 0:
+            raise ValueError("training update must be non-negative")
+        self._training_update = update
+
+    def episode_lineup(
+        self,
+        rng: random.Random,
+        player_count: int,
+        learner_id: int | None = None,
+    ) -> EpisodeLineup:
         """Sample a seeded learner seat and independent no-replacement opponents."""
         if player_count != self.player_count:
             raise ValueError("episode player count does not match the league")
-        learner_id = rng.randrange(player_count)
+        if learner_id is None:
+            learner_id = rng.randrange(player_count)
+        if not 0 <= learner_id < player_count:
+            raise ValueError("learner_id must reference a seated player")
         used_baselines: set[str] = set()
         used_snapshots: set[str] = set()
         opponents: dict[str, Agent] = {}
@@ -136,8 +197,19 @@ class DiversePolicyLeague:
             self._exposure[key] += 1
         return EpisodeLineup(learner_id, opponents, observations)
 
+    def episode_lineup_for_seat(
+        self, rng: random.Random, player_count: int, learner_id: int
+    ) -> EpisodeLineup:
+        """Build a lineup for a requested learner seat."""
+        return self.episode_lineup(rng, player_count, learner_id=learner_id)
+
     def register_snapshot(
-        self, path: Path, *, update: int, seed: int
+        self,
+        path: Path,
+        *,
+        update: int,
+        seed: int,
+        response_signature: tuple[float, ...] | None = None,
     ) -> PolicySnapshot:
         """Validate, archive, and score one frozen checkpoint."""
         if update < 1:
@@ -188,6 +260,12 @@ class DiversePolicyLeague:
         behavior = policy_behavior(snapshot, self.state_bank)
         self._archives.append(snapshot)
         self._behaviors[snapshot.policy_id] = behavior
+        if response_signature is not None:
+            if not response_signature:
+                raise ValueError("response signature must not be empty")
+            if not all(np.isfinite(response_signature)):
+                raise ValueError("response signature must be finite")
+            self._response_signatures[snapshot.policy_id] = tuple(response_signature)
         if update == self.config.warmup_updates and self._warmup_anchor is None:
             self._warmup_anchor = snapshot
         self._active_ids = self._retained_ids()
@@ -202,7 +280,21 @@ class DiversePolicyLeague:
         """Return mean per-state JS divergence for two behavior signatures."""
         first = self._behaviors[first_id].probabilities
         second = self._behaviors[second_id].probabilities
-        return mean_jensen_shannon_divergence(first, second)
+        state_divergence = mean_jensen_shannon_divergence(first, second)
+        if self.config.response_signature_weight <= 0.0:
+            return state_divergence
+        first_response = self._response_signatures.get(first_id)
+        second_response = self._response_signatures.get(second_id)
+        if first_response is None or second_response is None:
+            return state_divergence
+        if len(first_response) != len(second_response):
+            raise ValueError("response signatures must have equal dimensions")
+        response_distance = float(
+            np.mean(np.abs(np.asarray(first_response) - np.asarray(second_response)))
+        )
+        return (
+            1.0 - self.config.response_signature_weight
+        ) * state_divergence + self.config.response_signature_weight * response_distance
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -217,6 +309,10 @@ class DiversePolicyLeague:
             else None,
             "retention_strategy": self.config.retention_strategy,
             "opponent_exposure": dict(sorted(self._exposure.items())),
+            "response_signatures": {
+                policy_id: list(signature)
+                for policy_id, signature in sorted(self._response_signatures.items())
+            },
             "behavior_signatures": {
                 snapshot.policy_id: {
                     "update": snapshot.update,
@@ -289,11 +385,26 @@ class DiversePolicyLeague:
             if snapshot.policy_id not in used_snapshots
         ]
         snapshots = snapshots or list(self.snapshots)
+        anchor = self._warmup_anchor
+        if anchor is not None and all(
+            item.policy_id != anchor.policy_id for item in snapshots
+        ):
+            snapshots.append(anchor)
+        learned_probability = min(
+            self._learned_probability(), 1.0 - self.config.baseline_floor
+        )
         choose_learned = bool(snapshots) and (
-            not baselines or rng.random() < self.config.learned_opponent_probability
+            not baselines or rng.random() < learned_probability
         )
         if choose_learned:
-            selected = rng.choice(snapshots)
+            if (
+                anchor is not None
+                and anchor.policy_id not in used_snapshots
+                and rng.random() < self.config.warmup_anchor_probability
+            ):
+                selected = anchor
+            else:
+                selected = rng.choice(snapshots)
             used_snapshots.add(selected.policy_id)
             return "snapshot", selected
         if baselines:
@@ -305,6 +416,20 @@ class DiversePolicyLeague:
             used_snapshots.add(selected.policy_id)
             return "snapshot", selected
         raise RuntimeError("the policy league has no available opponents")
+
+    def _learned_probability(self) -> float:
+        start = self.config.learned_opponent_probability_start
+        end = self.config.learned_opponent_probability_end
+        if start is None or end is None:
+            return self.config.learned_opponent_probability
+        if self._training_update <= self.config.warmup_updates:
+            return 0.0
+        ramp = max(1, self.config.learned_opponent_ramp_updates)
+        progress = min(
+            1.0,
+            (self._training_update - self.config.warmup_updates) / ramp,
+        )
+        return start + progress * (end - start)
 
     def _instantiate_entry(
         self,
@@ -365,6 +490,7 @@ class DiverseLeaguePPOTrainer(PPOTrainer):
         history: list[dict[str, float]] = []
         snapshot_dir = checkpoint.parent / "checkpoints"
         for update in range(1, self.config.updates + 1):
+            self.league.set_training_update(update)
             rollout = self.collect_rollout()
             metrics = self.update(rollout)
             metrics["update"] = float(update)

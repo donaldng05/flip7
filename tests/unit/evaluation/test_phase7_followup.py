@@ -13,11 +13,13 @@ from flip7.evaluation import (
     build_state_bank,
     jensen_shannon_divergence,
     mean_jensen_shannon_divergence,
+    policy_behavior,
     run_paired_round_robin,
 )
 from flip7.training import (
     DiversePolicyLeague,
     FollowUpLeagueConfig,
+    PolicySnapshot,
     PPOConfig,
     PPOTrainer,
 )
@@ -57,6 +59,40 @@ def test_state_bank_and_js_are_deterministic_and_nonnegative() -> None:
         np.array([[1.0, 0.0], [0.5, 0.5]], dtype=np.float32),
         np.array([[0.0, 1.0], [0.5, 0.5]], dtype=np.float32),
     ) == pytest.approx(np.log(2.0) / 2.0)
+
+
+def test_behavior_analysis_supports_seat_conditioned_checkpoints(
+    tmp_path: Path,
+) -> None:
+    config = PPOConfig(
+        seed=5,
+        observation="basic",
+        rollout_steps=4,
+        updates=1,
+        epochs=1,
+        minibatch_size=2,
+        hidden_size=8,
+        network="separate",
+        critic_seat_conditioned=True,
+    )
+    trainer = PPOTrainer(config, opponent_names=("random",))
+    checkpoint = tmp_path / "conditioned.pt"
+    trainer.save_checkpoint(checkpoint, update=1)
+    snapshot = PolicySnapshot(
+        "conditioned",
+        checkpoint,
+        1,
+        5,
+        ObservationFamily.BASIC,
+        trainer.observation_size,
+        trainer.action_size,
+        {},
+    )
+
+    behavior = policy_behavior(snapshot, build_state_bank(states=4, seed=9))
+
+    assert behavior.probabilities.shape == (4, trainer.action_size)
+    assert len(behavior.deterministic_actions) == 4
 
 
 def test_followup_league_preserves_anchor_and_retains_all_archives(

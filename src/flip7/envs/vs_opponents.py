@@ -50,6 +50,7 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
         opponent_observation: ObservationFamily | str | None = None,
         opponent_observations: Mapping[str, ObservationFamily | str] | None = None,
         reward: RewardMode | str = RewardMode.SPARSE_WIN,
+        potential_gamma: float = 0.99,
         opponents: Mapping[str, Opponent] | None = None,
     ) -> None:
         super().__init__()
@@ -82,6 +83,7 @@ class Flip7VsOpponentsEnv(gym.Env[Observation, int]):
             player_count,
             observation=observation,
             reward=reward,
+            potential_gamma=potential_gamma,
         )
         self.observation_space = self._aec.observation_space(self.learner_agent)
         self.action_space = cast(

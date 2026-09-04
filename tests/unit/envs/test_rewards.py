@@ -12,10 +12,14 @@ def _result(
     *,
     winning_player_ids: tuple[int, ...] = (),
     score_changes: tuple[tuple[int, int], ...] = (),
+    scores: tuple[int, ...] = (0, 0, 0),
     is_game_terminal: bool = False,
 ) -> TransitionResult:
     state = GameState(
-        players=tuple(PlayerState(player_id=player_id) for player_id in range(3)),
+        players=tuple(
+            PlayerState(player_id=player_id, cumulative_score=scores[player_id])
+            for player_id in range(3)
+        ),
         dealer_id=0,
         current_player_id=None if is_game_terminal else 1,
         game_phase=GamePhase.COMPLETE if is_game_terminal else GamePhase.IN_PROGRESS,
@@ -66,3 +70,29 @@ def test_round_score_adds_scaled_scores_and_terminal_win() -> None:
     assert rewards[0] == pytest.approx(1.1)
     assert rewards[1] == pytest.approx(0.05)
     assert rewards[2] == 0.0
+
+
+def test_potential_win_uses_public_score_differential_and_terminal_win() -> None:
+    previous = _result(scores=(0, 0, 0)).state
+    result = _result(
+        scores=(20, 0, 0),
+        winning_player_ids=(0,),
+        is_game_terminal=True,
+    )
+
+    rewards = rewards_from_result(
+        result,
+        3,
+        RewardMode.POTENTIAL_WIN,
+        previous_state=previous,
+        potential_discount=1.0,
+    )
+
+    assert rewards[0] == pytest.approx(1.1)
+    assert rewards[1] == pytest.approx(-0.05)
+    assert rewards[2] == pytest.approx(-0.05)
+
+
+def test_potential_win_requires_the_previous_state() -> None:
+    with pytest.raises(ValueError, match="previous game state"):
+        rewards_from_result(_result(), 3, RewardMode.POTENTIAL_WIN)

@@ -13,6 +13,7 @@ from flip7.evaluation.diversity import (
     mean_jensen_shannon_divergence,
     non_transitive_cycles,
     pairwise_behavior_metrics,
+    policy_behavior,
 )
 from flip7.evaluation.follow_up import (
     ScheduledGame,
@@ -40,6 +41,11 @@ from flip7.evaluation.phase7 import (
     run_round_robin,
     validate_artifact_manifest,
     write_tournament,
+)
+from flip7.evaluation.stability import (
+    PairedEvaluation,
+    PairedGame,
+    run_paired_rotated_evaluation,
 )
 from flip7.evaluation.tournament import run_game, run_matchup, write_results
 
@@ -74,6 +80,7 @@ __all__ = [
     "masked_action_probabilities",
     "non_transitive_cycles",
     "pairwise_behavior_metrics",
+    "policy_behavior",
     "ScheduledGame",
     "build_paired_schedule",
     "direct_final_warmup_comparison",
@@ -81,4 +88,7 @@ __all__ = [
     "run_paired_round_robin",
     "schedule_as_dict",
     "validate_followup_manifest",
+    "PairedEvaluation",
+    "PairedGame",
+    "run_paired_rotated_evaluation",
 ]
