@@ -14,6 +14,7 @@ import torch
 from numpy.typing import NDArray
 from torch import Tensor, optim
 from torch.distributions import Categorical
+from torch.nn import functional as F
 
 from flip7 import __version__
 from flip7.agents import (
@@ -25,6 +26,7 @@ from flip7.agents import (
     FixedThresholdAgent,
     RandomLegalAgent,
     RoundDPAgent,
+    SeparateActorCritic,
     seed_torch,
 )
 from flip7.agents.learned import masked_logits
@@ -54,6 +56,12 @@ class PPOConfig:
     entropy_coefficient: float = 0.01
     max_grad_norm: float = 0.5
     device: str = "cpu"
+    network: str = "shared"
+    critic_seat_conditioned: bool = False
+    learning_rate_end: float | None = None
+    entropy_coefficient_end: float | None = None
+    target_kl: float | None = None
+    value_clip_epsilon: float | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,7 @@ class Rollout:
     dones: NDArray[np.bool_]
     values: NDArray[np.float32]
     next_value: float
+    seat_ids: NDArray[np.int64] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,8 +138,35 @@ class PPOTrainer:
             raise ValueError("learner_id must reference a seated player")
         if config.learner_seat_mode not in {"fixed", "random"}:
             raise ValueError("learner_seat_mode must be 'fixed' or 'random'")
+        if config.network not in {"shared", "separate"}:
+            raise ValueError("network must be 'shared' or 'separate'")
+        if config.critic_seat_conditioned and config.network != "separate":
+            raise ValueError("seat-conditioned critics require the separate network")
         if not opponent_names:
             raise ValueError("at least one opponent is required")
+        if config.learning_rate <= 0 or not np.isfinite(config.learning_rate):
+            raise ValueError("learning_rate must be positive and finite")
+        if config.learning_rate_end is not None and (
+            config.learning_rate_end <= 0 or not np.isfinite(config.learning_rate_end)
+        ):
+            raise ValueError("learning_rate_end must be positive and finite")
+        if config.entropy_coefficient < 0 or not np.isfinite(
+            config.entropy_coefficient
+        ):
+            raise ValueError("entropy_coefficient must be non-negative and finite")
+        if config.entropy_coefficient_end is not None and (
+            config.entropy_coefficient_end < 0
+            or not np.isfinite(config.entropy_coefficient_end)
+        ):
+            raise ValueError("entropy_coefficient_end must be non-negative and finite")
+        if config.target_kl is not None and (
+            config.target_kl <= 0 or not np.isfinite(config.target_kl)
+        ):
+            raise ValueError("target_kl must be positive and finite")
+        if config.value_clip_epsilon is not None and (
+            config.value_clip_epsilon <= 0 or not np.isfinite(config.value_clip_epsilon)
+        ):
+            raise ValueError("value_clip_epsilon must be positive and finite")
         available = baseline_factories()
         missing = set(opponent_names) - set(available)
         if missing:
@@ -140,6 +176,7 @@ class PPOTrainer:
         self._factories = available
         self._opponent_provider = opponent_provider or self._default_opponent_provider
         self._seat_opponent_provider = seat_opponent_provider
+        self._current_update = 1
         seed_torch(config.seed)
         self._rng = random.Random(config.seed)
         initial_env = self.new_env()
@@ -149,10 +186,58 @@ class PPOTrainer:
         self.observation_size = int(np.prod(shape))
         action_space = cast(Any, initial_env.action_space)
         self.action_size = int(action_space.n)
-        self.network = ActorCritic(
-            self.observation_size, self.action_size, config.hidden_size
-        ).to(config.device)
+        self.network: ActorCritic | SeparateActorCritic
+        if config.network == "separate":
+            self.network = SeparateActorCritic(
+                self.observation_size,
+                self.action_size,
+                config.hidden_size,
+                config.player_count if config.critic_seat_conditioned else 0,
+            ).to(config.device)
+        else:
+            self.network = ActorCritic(
+                self.observation_size, self.action_size, config.hidden_size
+            ).to(config.device)
         self.optimizer = optim.Adam(self.network.parameters(), lr=config.learning_rate)
+
+    def _scheduled_value(
+        self, start: float, end: float | None, update: int | None = None
+    ) -> float:
+        final = start if end is None else end
+        current = self._current_update if update is None else update
+        progress = (current - 1) / max(1, self.config.updates - 1)
+        progress = min(1.0, max(0.0, progress))
+        return start + progress * (final - start)
+
+    def _apply_schedules(self) -> tuple[float, float]:
+        learning_rate = self._scheduled_value(
+            self.config.learning_rate, self.config.learning_rate_end
+        )
+        entropy_coefficient = self._scheduled_value(
+            self.config.entropy_coefficient,
+            self.config.entropy_coefficient_end,
+        )
+        for group in self.optimizer.param_groups:
+            group["lr"] = learning_rate
+        return learning_rate, entropy_coefficient
+
+    def _critic_context(
+        self, seat_ids: NDArray[np.int64] | Tensor | None
+    ) -> Tensor | None:
+        if not self.config.critic_seat_conditioned:
+            return None
+        if seat_ids is None:
+            raise ValueError("seat ids are required by the conditioned critic")
+        seats = torch.as_tensor(seat_ids, dtype=torch.int64, device=self.config.device)
+        return F.one_hot(seats, num_classes=self.config.player_count).to(torch.float32)
+
+    def _forward(
+        self, observations: Tensor, seat_ids: NDArray[np.int64] | Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        context = self._critic_context(seat_ids)
+        if isinstance(self.network, SeparateActorCritic):
+            return self.network(observations, context)
+        return self.network(observations)
 
     def new_env(
         self, *, requested_learner_id: int | None = None
@@ -174,6 +259,7 @@ class PPOTrainer:
             observation=ObservationFamily(self.config.observation),
             opponent_observations=lineup.opponent_observations,
             reward=RewardMode(self.config.reward),
+            potential_gamma=self.config.gamma,
             opponents=lineup.opponents,
         )
 
@@ -209,6 +295,7 @@ class PPOTrainer:
         rewards: list[float] = []
         dones: list[bool] = []
         values: list[float] = []
+        seat_ids: list[int] = []
         env = self.new_env()
         observation, info = env.reset(seed=self._rng.randrange(2**31))
         for _ in range(self.config.rollout_steps):
@@ -218,7 +305,10 @@ class PPOTrainer:
             ).unsqueeze(0)
             mask_tensor = torch.as_tensor(mask, dtype=torch.bool).unsqueeze(0)
             with torch.no_grad():
-                logits, value = self.network(observation_tensor)
+                logits, value = self._forward(
+                    observation_tensor,
+                    np.asarray([env.learner_id], dtype=np.int64),
+                )
                 distribution = Categorical(logits=masked_logits(logits, mask_tensor))
                 action_tensor: Tensor = distribution.sample()
             action = int(cast(float, action_tensor.item()))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
@@ -234,6 +324,7 @@ class PPOTrainer:
             rewards.append(float(reward))
             dones.append(bool(terminated or truncated))
             values.append(float(value.item()))
+            seat_ids.append(env.learner_id)
             observation, info = next_observation, next_info
             if terminated or truncated:
                 env.close()
@@ -241,8 +332,9 @@ class PPOTrainer:
                 observation, info = env.reset(seed=self._rng.randrange(2**31))
         with torch.no_grad():
             next_value = float(
-                self.network(
-                    torch.as_tensor(observation, dtype=torch.float32).unsqueeze(0)
+                self._forward(
+                    torch.as_tensor(observation, dtype=torch.float32).unsqueeze(0),
+                    np.asarray([env.learner_id], dtype=np.int64),
                 )[1].item()
             )
         env.close()
@@ -255,6 +347,7 @@ class PPOTrainer:
             np.asarray(dones, dtype=np.bool_),
             np.asarray(values, dtype=np.float32),
             next_value,
+            np.asarray(seat_ids, dtype=np.int64),
         )
 
     def update(self, rollout: Rollout) -> dict[str, float]:
@@ -274,16 +367,34 @@ class PPOTrainer:
             "old_log_probs": torch.as_tensor(
                 rollout.old_log_probs, dtype=torch.float32
             ),
+            "old_values": torch.as_tensor(rollout.values, dtype=torch.float32),
             "advantages": torch.as_tensor(advantages, dtype=torch.float32),
             "returns": torch.as_tensor(returns, dtype=torch.float32),
         }
+        if rollout.seat_ids is not None:
+            tensors["seat_ids"] = torch.as_tensor(rollout.seat_ids, dtype=torch.int64)
+        elif self.config.critic_seat_conditioned:
+            raise ValueError("rollout is missing seat ids for the conditioned critic")
         size = len(rollout.rewards)
-        totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "updates": 0.0}
+        learning_rate, entropy_coefficient = self._apply_schedules()
+        totals = {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy": 0.0,
+            "approx_kl": 0.0,
+            "clip_fraction": 0.0,
+            "updates": 0.0,
+        }
+        stop_early = False
         for _ in range(self.config.epochs):
             order = torch.randperm(size)
             for start in range(0, size, self.config.minibatch_size):
                 indices = order[start : start + self.config.minibatch_size]
-                logits, values = self.network(tensors["observations"][indices])
+                seat_batch = tensors.get("seat_ids")
+                logits, values = self._forward(
+                    tensors["observations"][indices],
+                    None if seat_batch is None else seat_batch[indices],
+                )
                 distribution = Categorical(
                     logits=masked_logits(logits, tensors["masks"][indices])
                 )
@@ -301,15 +412,35 @@ class PPOTrainer:
                     * tensors["advantages"][indices]
                 )
                 policy_loss = -torch.minimum(unclipped, clipped).mean()
-                value_loss = (values - tensors["returns"][indices]).pow(2).mean()
+                if self.config.value_clip_epsilon is None:
+                    value_loss = (values - tensors["returns"][indices]).pow(2).mean()
+                else:
+                    value_delta = values - tensors["old_values"][indices]
+                    clipped_values = tensors["old_values"][indices] + torch.clamp(
+                        value_delta,
+                        -self.config.value_clip_epsilon,
+                        self.config.value_clip_epsilon,
+                    )
+                    value_loss = torch.maximum(
+                        (values - tensors["returns"][indices]).pow(2),
+                        (clipped_values - tensors["returns"][indices]).pow(2),
+                    ).mean()
                 entropy = distribution.entropy().mean()
+                approx_kl = (
+                    0.5 * (tensors["old_log_probs"][indices] - log_probs).pow(2).mean()
+                )
+                clip_fraction = (
+                    (torch.abs(ratio - 1.0) > self.config.clip_epsilon)
+                    .to(torch.float32)
+                    .mean()
+                )
                 loss = (
                     policy_loss
                     + self.config.value_coefficient * value_loss
-                    - self.config.entropy_coefficient * entropy
+                    - entropy_coefficient * entropy
                 )
                 self.optimizer.zero_grad()
-                loss.backward()
+                loss.backward()  # pyright: ignore[reportUnknownMemberType]
                 torch.nn.utils.clip_grad_norm_(
                     self.network.parameters(), self.config.max_grad_norm
                 )
@@ -317,11 +448,25 @@ class PPOTrainer:
                 totals["policy_loss"] += float(policy_loss.item())
                 totals["value_loss"] += float(value_loss.item())
                 totals["entropy"] += float(entropy.item())
+                totals["approx_kl"] += float(approx_kl.item())
+                totals["clip_fraction"] += float(clip_fraction.item())
                 totals["updates"] += 1
+                if self.config.target_kl is not None and float(approx_kl.item()) > (
+                    1.5 * self.config.target_kl
+                ):
+                    stop_early = True
+                    break
+            if stop_early:
+                break
         count = max(1.0, totals["updates"])
         return {
             key: value / count for key, value in totals.items() if key != "updates"
-        } | {"updates": totals["updates"]}
+        } | {
+            "updates": totals["updates"],
+            "learning_rate": learning_rate,
+            "entropy_coefficient": entropy_coefficient,
+            "target_kl_stop": float(stop_early),
+        }
 
     def save_checkpoint(
         self,
@@ -334,6 +479,9 @@ class PPOTrainer:
         config = asdict(self.config) | {
             "observation_size": self.observation_size,
             "action_size": self.action_size,
+            "critic_context_size": (
+                self.config.player_count if self.config.critic_seat_conditioned else 0
+            ),
         }
         payload: dict[str, object] = {
             "model_state": self.network.state_dict(),
@@ -357,6 +505,9 @@ class PPOTrainer:
         if (
             saved_config["observation_size"] != self.observation_size
             or saved_config["action_size"] != self.action_size
+            or saved_config.get("network", "shared") != self.config.network
+            or saved_config.get("critic_context_size", 0)
+            != (self.config.player_count if self.config.critic_seat_conditioned else 0)
         ):
             raise ValueError("checkpoint dimensions do not match the trainer")
         self.network.load_state_dict(payload["model_state"])
@@ -366,6 +517,7 @@ class PPOTrainer:
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
         history: list[dict[str, float]] = []
         for update in range(1, self.config.updates + 1):
+            self._current_update = update
             rollout = self.collect_rollout()
             metrics = self.update(rollout)
             metrics["update"] = float(update)
