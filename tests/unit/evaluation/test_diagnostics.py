@@ -1,6 +1,8 @@
 """Tests for Phase 7 diagnostic validation and classification helpers."""
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -121,7 +123,7 @@ def test_reference_reproduction_uses_seed_level_uncertainty() -> None:
         17: _summary((0.55, 0.65, 0.75), seat_margin=0.01),
     }
     assert not all(
-        float(summary["seat_spread"]) <= 0.05
+        float(cast(float, summary["seat_spread"])) <= 0.05
         for summary in pooled_pass_seed_fail.values()
     )
 
@@ -163,8 +165,8 @@ def test_bootstrap_is_stratified_by_learner_seat_and_reproducible() -> None:
 
     assert first == second
     assert first["method"] == "stratified_game_bootstrap"
-    assert set(first["seat_intervals"]) == {"0", "1", "2"}
-    assert len(first["seat_spread_interval"]) == 2
+    assert set(cast(Mapping[str, object], first["seat_intervals"])) == {"0", "1", "2"}
+    assert len(cast(Sequence[object], first["seat_spread_interval"])) == 2
 
 
 def test_diagnostic_classification_distinguishes_reference_recipe_and_noise() -> None:
