@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -62,6 +64,7 @@ class PPOConfig:
     entropy_coefficient_end: float | None = None
     target_kl: float | None = None
     value_clip_epsilon: float | None = None
+    rollout_workers: int = 1
 
 
 @dataclass(frozen=True)
@@ -157,6 +160,222 @@ def baseline_factories(*, random_seed: int = 101) -> dict[str, AgentFactory]:
     }
 
 
+def balanced_quotas(steps: int, count: int) -> tuple[int, ...]:
+    """Return deterministic, maximally equal transition quotas."""
+    if steps < 1:
+        raise ValueError("steps must be positive")
+    if count < 1:
+        raise ValueError("count must be positive")
+    base, remainder = divmod(steps, count)
+    return tuple(base + int(i < remainder) for i in range(count))
+
+
+@dataclass(frozen=True)
+class BaselineOpponentProvider:
+    """Picklable baseline opponent lineup provider."""
+
+    names: tuple[str, ...]
+    learner_id: int = 0
+    learner_seat_mode: str = "fixed"
+
+    def __call__(
+        self,
+        rng: random.Random,
+        player_count: int,
+        requested_learner_id: int | None = None,
+    ) -> EpisodeLineup:
+        if requested_learner_id is not None:
+            learner = requested_learner_id
+        elif self.learner_seat_mode == "fixed":
+            learner = self.learner_id
+        else:
+            learner = rng.randrange(player_count)
+        opponent_name = rng.choice(self.names)
+        policy_seed = rng.randrange(2**31)
+        factory = baseline_factories(random_seed=policy_seed)[opponent_name]
+        opponents = {
+            agent_name(seat): factory()
+            for seat in range(player_count)
+            if seat != learner
+        }
+        opponent_observations = {
+            agent_name(seat): ObservationFamily.DECK_AWARE
+            for seat in range(player_count)
+            if seat != learner
+        }
+        return EpisodeLineup(learner, opponents, opponent_observations)
+
+
+@dataclass(frozen=True)
+class RolloutChunkTask:
+    """Serializable task descriptor for one parallel rollout chunk."""
+
+    chunk_index: int
+    seed: int
+    steps: int
+    player_count: int
+    requested_learner_id: int | None
+    observation_family: str
+    reward_mode: str
+    gamma: float
+    weights: dict[str, Tensor]
+    network_type: str
+    observation_size: int
+    action_size: int
+    hidden_size: int
+    critic_seat_conditioned: bool
+    opponent_provider: Any
+
+
+@dataclass(frozen=True)
+class RolloutChunkResult:
+    """Serializable trajectory transitions collected by a worker process."""
+
+    chunk_index: int
+    observations: NDArray[np.float32]
+    masks: NDArray[np.int8]
+    actions: NDArray[np.int64]
+    old_log_probs: NDArray[np.float32]
+    rewards: NDArray[np.float32]
+    dones: NDArray[np.bool_]
+    values: NDArray[np.float32]
+    next_value: float
+    seat_ids: NDArray[np.int64]
+    reset_seeds: tuple[int, ...]
+
+
+def collect_rollout_chunk_in_worker(
+    task: RolloutChunkTask,
+) -> RolloutChunkResult:
+    """Collect an independent trajectory chunk in a CPU worker process."""
+    torch.set_num_threads(1)
+    if task.network_type == "separate":
+        network: ActorCritic | SeparateActorCritic = SeparateActorCritic(
+            task.observation_size,
+            task.action_size,
+            task.hidden_size,
+            task.player_count if task.critic_seat_conditioned else 0,
+        )
+    else:
+        network = ActorCritic(
+            task.observation_size,
+            task.action_size,
+            task.hidden_size,
+        )
+    network.load_state_dict(task.weights)
+    network.eval()
+
+    worker_rng = random.Random(task.seed)
+    observations: list[NDArray[np.float32]] = []
+    masks: list[NDArray[np.int8]] = []
+    actions: list[int] = []
+    old_log_probs: list[float] = []
+    rewards: list[float] = []
+    dones: list[bool] = []
+    values: list[float] = []
+    seat_ids: list[int] = []
+    reset_seeds: list[int] = []
+
+    def _create_env(requested_id: int | None) -> Flip7VsOpponentsEnv:
+        provider = task.opponent_provider
+        if requested_id is not None:
+            try:
+                lineup = provider(worker_rng, task.player_count, requested_id)
+            except TypeError:
+                lineup = provider(worker_rng, task.player_count)
+        else:
+            lineup = provider(worker_rng, task.player_count)
+        if not 0 <= lineup.learner_id < task.player_count:
+            raise ValueError("opponent provider returned an invalid learner seat")
+        return Flip7VsOpponentsEnv(
+            task.player_count,
+            learner_id=lineup.learner_id,
+            observation=ObservationFamily(task.observation_family),
+            opponent_observations=lineup.opponent_observations,
+            reward=RewardMode(task.reward_mode),
+            potential_gamma=task.gamma,
+            opponents=lineup.opponents,
+        )
+
+    def _critic_context(seat: int) -> Tensor | None:
+        if not task.critic_seat_conditioned:
+            return None
+        return F.one_hot(
+            torch.as_tensor([seat], dtype=torch.int64),
+            num_classes=task.player_count,
+        ).to(torch.float32)
+
+    def _forward(obs: Tensor, seat: int) -> tuple[Tensor, Tensor]:
+        context = _critic_context(seat)
+        if isinstance(network, SeparateActorCritic):
+            return network(obs, context)
+        return network(obs)
+
+    env = _create_env(task.requested_learner_id)
+    reset_seed = worker_rng.randrange(2**31)
+    reset_seeds.append(reset_seed)
+    observation, info = env.reset(seed=reset_seed)
+
+    for step_idx in range(task.steps):
+        mask = info["action_mask"]
+        observation_tensor = torch.as_tensor(
+            observation, dtype=torch.float32
+        ).unsqueeze(0)
+        mask_tensor = torch.as_tensor(mask, dtype=torch.bool).unsqueeze(0)
+        with torch.no_grad():
+            logits, value = _forward(observation_tensor, env.learner_id)
+            distribution = Categorical(logits=masked_logits(logits, mask_tensor))
+            action_tensor: Tensor = distribution.sample()
+        action = int(cast(float, action_tensor.item()))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        next_observation, reward, terminated, truncated, next_info = env.step(action)
+
+        observations.append(observation.copy())
+        masks.append(mask.copy())
+        actions.append(action)
+        old_log_probs.append(
+            float(cast(Tensor, distribution.log_prob(action_tensor)).item())  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        )
+        rewards.append(float(reward))
+        dones.append(terminated or truncated)
+        values.append(float(value.item()))
+        seat_ids.append(env.learner_id)
+
+        observation, info = next_observation, next_info
+        if terminated or truncated:
+            env.close()
+            if step_idx < task.steps - 1:
+                env = _create_env(task.requested_learner_id)
+                reset_seed = worker_rng.randrange(2**31)
+                reset_seeds.append(reset_seed)
+                observation, info = env.reset(seed=reset_seed)
+
+    if dones[-1]:
+        next_value = 0.0
+    else:
+        with torch.no_grad():
+            next_value = float(
+                _forward(
+                    torch.as_tensor(observation, dtype=torch.float32).unsqueeze(0),
+                    env.learner_id,
+                )[1].item()
+            )
+    env.close()
+
+    return RolloutChunkResult(
+        chunk_index=task.chunk_index,
+        observations=np.asarray(observations, dtype=np.float32),
+        masks=np.asarray(masks, dtype=np.int8),
+        actions=np.asarray(actions, dtype=np.int64),
+        old_log_probs=np.asarray(old_log_probs, dtype=np.float32),
+        rewards=np.asarray(rewards, dtype=np.float32),
+        dones=np.asarray(dones, dtype=np.bool_),
+        values=np.asarray(values, dtype=np.float32),
+        next_value=next_value,
+        seat_ids=np.asarray(seat_ids, dtype=np.int64),
+        reset_seeds=tuple(reset_seeds),
+    )
+
+
 class PPOTrainer:
     """Train a masked actor-critic policy against frozen baseline opponents."""
 
@@ -203,6 +422,10 @@ class PPOTrainer:
             config.value_clip_epsilon <= 0 or not np.isfinite(config.value_clip_epsilon)
         ):
             raise ValueError("value_clip_epsilon must be positive and finite")
+        if config.rollout_workers < 1:
+            raise ValueError("rollout_workers must be at least 1")
+        if config.rollout_workers > config.rollout_steps:
+            raise ValueError("rollout_workers cannot exceed rollout_steps")
         available = baseline_factories()
         missing = set(opponent_names) - set(available)
         if missing:
@@ -210,9 +433,16 @@ class PPOTrainer:
         self.config = config
         self.opponent_names = opponent_names
         self._factories = available
+        self._default_provider = BaselineOpponentProvider(
+            self.opponent_names,
+            learner_id=config.learner_id,
+            learner_seat_mode=config.learner_seat_mode,
+        )
+        self._is_custom_provider = opponent_provider is not None
         self._opponent_provider = opponent_provider or self._default_opponent_provider
         self._seat_opponent_provider = seat_opponent_provider
         self._current_update = 1
+        self._worker_pool: ProcessPoolExecutor | None = None
         seed_torch(config.seed)
         self._rng = random.Random(config.seed)
         initial_env = self.new_env()
@@ -235,6 +465,24 @@ class PPOTrainer:
                 self.observation_size, self.action_size, config.hidden_size
             ).to(config.device)
         self.optimizer = optim.Adam(self.network.parameters(), lr=config.learning_rate)
+
+    @property
+    def worker_pool(self) -> ProcessPoolExecutor | None:
+        """Active persistent worker pool, or None if not currently running train()."""
+        return self._worker_pool
+
+    @contextmanager
+    def worker_pool_scope(self) -> Generator[ProcessPoolExecutor | None, None, None]:
+        """Keep a persistent ProcessPoolExecutor open across training updates."""
+        if self.config.rollout_workers > 1 and self._worker_pool is None:
+            with ProcessPoolExecutor(max_workers=self.config.rollout_workers) as pool:
+                self._worker_pool = pool
+                try:
+                    yield pool
+                finally:
+                    self._worker_pool = None
+        else:
+            yield self._worker_pool
 
     def _scheduled_value(
         self, start: float, end: float | None, update: int | None = None
@@ -323,7 +571,73 @@ class PPOTrainer:
             return self.config.learner_id
         return source.randrange(self.config.player_count)
 
+    def _collect_rollout_parallel(self) -> Rollout:
+        quotas = balanced_quotas(self.config.rollout_steps, self.config.rollout_workers)
+        weights = {k: v.detach().cpu() for k, v in self.network.state_dict().items()}
+        provider: Any = (
+            self._opponent_provider
+            if self._is_custom_provider
+            else self._default_provider
+        )
+
+        tasks = [
+            RolloutChunkTask(
+                chunk_index=index,
+                seed=self._rng.randrange(2**31),
+                steps=quota,
+                player_count=self.config.player_count,
+                requested_learner_id=None,
+                observation_family=self.config.observation,
+                reward_mode=self.config.reward,
+                gamma=self.config.gamma,
+                weights=weights,
+                network_type=self.config.network,
+                observation_size=self.observation_size,
+                action_size=self.action_size,
+                hidden_size=self.config.hidden_size,
+                critic_seat_conditioned=self.config.critic_seat_conditioned,
+                opponent_provider=provider,
+            )
+            for index, quota in enumerate(quotas)
+        ]
+
+        if self._worker_pool is not None:
+            results = list(
+                self._worker_pool.map(collect_rollout_chunk_in_worker, tasks)
+            )
+        else:
+            with ProcessPoolExecutor(max_workers=self.config.rollout_workers) as pool:
+                results = list(pool.map(collect_rollout_chunk_in_worker, tasks))
+
+        results.sort(key=lambda r: r.chunk_index)
+        total_steps = sum(len(r.rewards) for r in results)
+        segment_ends = np.zeros(total_steps, dtype=np.bool_)
+        segment_bootstraps = np.zeros(total_steps, dtype=np.float32)
+        offset = 0
+        for r in results:
+            chunk_len = len(r.rewards)
+            end_idx = offset + chunk_len - 1
+            segment_ends[end_idx] = True
+            segment_bootstraps[end_idx] = r.next_value
+            offset += chunk_len
+
+        return Rollout(
+            np.concatenate([r.observations for r in results], axis=0),
+            np.concatenate([r.masks for r in results], axis=0),
+            np.concatenate([r.actions for r in results], axis=0),
+            np.concatenate([r.old_log_probs for r in results], axis=0),
+            np.concatenate([r.rewards for r in results], axis=0),
+            np.concatenate([r.dones for r in results], axis=0),
+            np.concatenate([r.values for r in results], axis=0),
+            float(results[-1].next_value),
+            np.concatenate([r.seat_ids for r in results], axis=0),
+            segment_ends,
+            segment_bootstraps,
+        )
+
     def collect_rollout(self) -> Rollout:
+        if self.config.rollout_workers > 1:
+            return self._collect_rollout_parallel()
         observations: list[NDArray[np.float32]] = []
         masks: list[NDArray[np.int8]] = []
         actions: list[int] = []
@@ -358,7 +672,7 @@ class PPOTrainer:
                 float(cast(Tensor, distribution.log_prob(action_tensor)).item())  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
             )
             rewards.append(float(reward))
-            dones.append(bool(terminated or truncated))
+            dones.append(terminated or truncated)
             values.append(float(value.item()))
             seat_ids.append(env.learner_id)
             observation, info = next_observation, next_info
@@ -553,17 +867,18 @@ class PPOTrainer:
         return int(payload["update"])
 
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
-        history: list[dict[str, float]] = []
-        for update in range(1, self.config.updates + 1):
-            self._current_update = update
-            rollout = self.collect_rollout()
-            metrics = self.update(rollout)
-            metrics["update"] = float(update)
-            metrics["mean_reward"] = float(rollout.rewards.mean())
-            history.append(metrics)
-            if checkpoint is not None:
-                self.save_checkpoint(checkpoint, update)
-        return history
+        with self.worker_pool_scope():
+            history: list[dict[str, float]] = []
+            for update in range(1, self.config.updates + 1):
+                self._current_update = update
+                rollout = self.collect_rollout()
+                metrics = self.update(rollout)
+                metrics["update"] = float(update)
+                metrics["mean_reward"] = float(rollout.rewards.mean())
+                history.append(metrics)
+                if checkpoint is not None:
+                    self.save_checkpoint(checkpoint, update)
+            return history
 
 
 def write_history(path: Path, history: list[dict[str, float]]) -> None:
@@ -573,13 +888,18 @@ def write_history(path: Path, history: list[dict[str, float]]) -> None:
 
 
 __all__ = [
+    "BaselineOpponentProvider",
     "EpisodeLineup",
     "OpponentProvider",
-    "SeatOpponentProvider",
     "PPOConfig",
     "PPOTrainer",
     "Rollout",
+    "RolloutChunkResult",
+    "RolloutChunkTask",
+    "SeatOpponentProvider",
+    "balanced_quotas",
     "baseline_factories",
+    "collect_rollout_chunk_in_worker",
     "compute_gae",
     "write_history",
 ]
