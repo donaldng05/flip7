@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
@@ -12,7 +10,6 @@ from statistics import median
 from typing import cast
 
 from flip7 import __version__
-from flip7.agents import PPOAgent
 from flip7.config.loader import load_config
 from flip7.envs import ObservationFamily
 from flip7.evaluation import (
@@ -20,10 +17,22 @@ from flip7.evaluation import (
     run_rotated_matchups,
     run_round_robin,
     summarize_rotated_results,
-    validate_artifact_manifest,
     write_tournament,
 )
-from flip7.evaluation.phase7 import TournamentParticipant
+from flip7.evaluation.phase7 import TournamentParticipant, validate_artifact_manifest
+from flip7.experiment import (
+    GateConfig,
+    as_ints,
+    as_list,
+    as_mapping,
+    as_pairs,
+    as_strings,
+    cached_policy,
+    evaluate_phase7_gates,
+    sha256_file,
+    training_config,
+    write_json,
+)
 from flip7.training import (
     LeagueConfig,
     LeaguePPOTrainer,
@@ -36,96 +45,29 @@ from flip7.training import (
 )
 
 
-def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    return cast(Mapping[str, object], value)
-
-
-def _list(value: object, name: str) -> list[object]:
-    if not isinstance(value, list):
-        raise ValueError(f"{name} must be a list")
-    return value
-
-
-def _strings(value: object, name: str) -> tuple[str, ...]:
-    values = _list(value, name)
-    if not all(isinstance(item, str) for item in values):
-        raise ValueError(f"{name} must contain only strings")
-    return tuple(cast(str, item) for item in values)
-
-
-def _integers(value: object, name: str) -> tuple[int, ...]:
-    values = _list(value, name)
-    if not all(isinstance(item, int) for item in values):
-        raise ValueError(f"{name} must contain only integers")
-    return tuple(cast(int, item) for item in values)
-
-
-def _matchups(value: object, name: str) -> tuple[tuple[str, str], ...]:
-    pairs: list[tuple[str, str]] = []
-    for index, item in enumerate(_list(value, name)):
-        pair = _strings(item, f"{name}[{index}]")
-        if len(pair) != 2:
-            raise ValueError(f"each {name} entry must contain two opponents")
-        pairs.append((pair[0], pair[1]))
-    if not pairs:
-        raise ValueError(f"{name} must not be empty")
-    return tuple(pairs)
-
-
 def _config_for_condition(
     root: Mapping[str, object], condition: Mapping[str, object], seed: int
 ) -> PPOConfig:
-    environment = _mapping(root["env"], "env")
-    training = _mapping(root["training"], "training")
-    config_values: dict[str, object] = dict(training)
-    config_values.update(
-        {
-            "seed": seed,
-            "player_count": int(root["players"]),
-            "learner_id": int(environment["learner_id"]),
-            "learner_seat_mode": str(environment["learner_seat_mode"]),
-            "observation": str(environment["observation"]),
-            "reward": str(environment["reward"]),
-        }
-    )
-    config_values.pop("algorithm", None)
     if "trainer" not in condition:
         raise ValueError("condition is missing trainer")
-    return PPOConfig(**config_values)
+    return training_config(root, seed)
 
 
 def _league_config(
     root: Mapping[str, object], condition: Mapping[str, object]
 ) -> LeagueConfig:
-    population = _mapping(condition["population"], "condition.population")
-    opponents = _mapping(root["opponents"], "opponents")
+    population = as_mapping(condition["population"], "condition.population")
+    opponents = as_mapping(root["opponents"], "opponents")
     values: dict[str, object] = dict(population)
-    values["baseline_names"] = _strings(opponents["training"], "opponents.training")
+    values["baseline_names"] = as_strings(opponents["training"], "opponents.training")
     return LeagueConfig(**values)
 
 
-def _write_json(path: Path, payload: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _rating(result: Mapping[str, object], name: str) -> float | None:
-    elo = _mapping(result["elo"], "tournament.elo")
-    rows = _list(elo["ratings"], "tournament.elo.ratings")
+    elo = as_mapping(result["elo"], "tournament.elo")
+    rows = as_list(elo["ratings"], "tournament.elo.ratings")
     for row_value in rows:
-        row = _mapping(row_value, "tournament.elo.rating")
+        row = as_mapping(row_value, "tournament.elo.rating")
         if row["name"] == name:
             return float(row["rating"])
     return None
@@ -134,7 +76,7 @@ def _rating(result: Mapping[str, object], name: str) -> float | None:
 def _participant_for_snapshot(snapshot: PolicySnapshot) -> TournamentParticipant:
     return TournamentParticipant(
         snapshot.policy_id,
-        lambda path=snapshot.path: PPOAgent.from_checkpoint(path, deterministic=True),
+        cached_policy(snapshot.path),
         snapshot.observation,
     )
 
@@ -158,8 +100,8 @@ def _aggregate_rotated_summaries(
         per_seat[seat_key] = (
             sum(
                 float(
-                    _mapping(
-                        _mapping(summary["per_seat"], "rotated per-seat summary")[
+                    as_mapping(
+                        as_mapping(summary["per_seat"], "rotated per-seat summary")[
                             seat_key
                         ],
                         "rotated seat summary",
@@ -198,8 +140,8 @@ def _run_seed(
     if trainer_name == "ppo":
         trainer: PPOTrainer | LeaguePPOTrainer = PPOTrainer(
             config,
-            opponent_names=_strings(
-                _mapping(root["opponents"], "opponents")["training"],
+            opponent_names=as_strings(
+                as_mapping(root["opponents"], "opponents")["training"],
                 "opponents.training",
             ),
         )
@@ -216,7 +158,7 @@ def _run_seed(
         write_population(population_path, trainer.league)
         snapshots = trainer.league.snapshots
     else:
-        _write_json(
+        write_json(
             population_path,
             {
                 "config": {"mode": "baseline_control"},
@@ -228,27 +170,23 @@ def _run_seed(
         )
         snapshots = ()
 
-    evaluation = _mapping(root["evaluation"], "evaluation")
+    evaluation = as_mapping(root["evaluation"], "evaluation")
     games_per_seat = int(evaluation["games_per_seat"])
-    seed_bases = _integers(evaluation["seed_bases"], "evaluation.seed_bases")
-    matchups = _matchups(evaluation["matchups"], "evaluation.matchups")
+    seed_bases = as_ints(evaluation["seed_bases"], "evaluation.seed_bases")
+    matchups = as_pairs(evaluation["matchups"], "evaluation.matchups")
     heldout_matchup_values = evaluation.get("heldout_matchups")
     if heldout_matchup_values is None:
         raise ValueError("evaluation.heldout_matchups is required")
-    heldout_matchup_values = _matchups(
-        heldout_matchup_values, "evaluation.heldout_matchups"
-    )
-    heldout_seed_values = _integers(
+    heldout_matchups = as_pairs(heldout_matchup_values, "evaluation.heldout_matchups")
+    heldout_seed_values = as_ints(
         evaluation.get("heldout_seed_bases", []),
         "evaluation.heldout_seed_bases",
     )
-    if len(heldout_seed_values) != len(heldout_matchup_values):
+    if len(heldout_seed_values) != len(heldout_matchups):
         raise ValueError("one held-out evaluation seed base is required per matchup")
     observation = ObservationFamily(config.observation)
 
-    def policy() -> PPOAgent:
-        return PPOAgent.from_checkpoint(checkpoint, deterministic=True)
-
+    policy = cached_policy(checkpoint)
     baseline_roster = baseline_factories()
     rotated_results = run_rotated_matchups(
         policy,
@@ -265,10 +203,10 @@ def _run_seed(
         games=games_per_seat,
         seed_bases=heldout_seed_values,
         observation=observation,
-        matchups=heldout_matchup_values,
+        matchups=heldout_matchups,
     )
 
-    tournament_values = _mapping(root["tournament"], "tournament")
+    tournament_values = as_mapping(root["tournament"], "tournament")
     participants = [
         TournamentParticipant(name, factory, ObservationFamily.DECK_AWARE)
         for name, factory in baseline_roster.items()
@@ -298,7 +236,7 @@ def _run_seed(
         "package_version": __version__,
         "config": asdict(config),
         "checkpoint": str(checkpoint),
-        "checkpoint_sha256": _sha256(checkpoint),
+        "checkpoint_sha256": sha256_file(checkpoint),
         "training_history": str(history_path),
         "population": str(population_path),
         "evaluation": str(evaluation_path),
@@ -307,7 +245,7 @@ def _run_seed(
         "observation": config.observation,
         "learner_seat_mode": config.learner_seat_mode,
         "baseline_matchups": [list(pair) for pair in matchups],
-        "heldout_matchups": [list(pair) for pair in heldout_matchup_values],
+        "heldout_matchups": [list(pair) for pair in heldout_matchups],
         "heldout_seed_bases": list(heldout_seed_values),
         "summary": {
             "baseline_rotated": baseline_summary,
@@ -326,8 +264,8 @@ def _run_seed(
         "baseline_rotated": baseline_summary,
         "heldout_rotated": heldout_summary,
     }
-    _write_json(evaluation_path, evaluation_payload)
-    _write_json(manifest_path, metadata)
+    write_json(evaluation_path, evaluation_payload)
+    write_json(manifest_path, metadata)
     validate_artifact_manifest(metadata)
     return {
         "seed": seed,
@@ -403,55 +341,51 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/phase7"))
     args = parser.parse_args()
 
-    root = _mapping(load_config(args.config), "configuration")
-    seeds = _integers(root["seeds"], "seeds")
-    conditions = _list(root["conditions"], "conditions")
+    root = as_mapping(load_config(args.config), "configuration")
+    seeds = as_ints(root["seeds"], "seeds")
+    conditions = as_list(root["conditions"], "conditions")
     condition_results: dict[str, object] = {}
     for index, condition_value in enumerate(conditions):
-        condition = _mapping(condition_value, f"conditions[{index}]")
+        condition = as_mapping(condition_value, f"conditions[{index}]")
         if "name" not in condition:
             raise ValueError(f"conditions[{index}] is missing name")
         condition_results[str(condition["name"])] = _run_condition(
             root, condition, seeds, args.output_root
         )
 
-    reference = _mapping(root["phase6_reference"], "phase6_reference")
+    reference = as_mapping(root["phase6_reference"], "phase6_reference")
     reference_win_share = float(reference["pooled_win_share"])
     reference_spread = float(reference["seat_spread"])
-    control = _mapping(condition_results["baseline_control"], "baseline_control")
-    league = _mapping(condition_results["league_mixed"], "league_mixed")
-    latest = _mapping(condition_results["latest_only"], "latest_only")
-    control_baseline = _mapping(control["aggregate"], "baseline aggregate")[
+    control = as_mapping(condition_results["baseline_control"], "baseline_control")
+    league = as_mapping(condition_results["league_mixed"], "league_mixed")
+    latest = as_mapping(condition_results["latest_only"], "latest_only")
+    control_baseline = as_mapping(control["aggregate"], "baseline aggregate")[
         "baseline_rotated"
     ]
-    league_aggregate = _mapping(league["aggregate"], "league aggregate")
-    latest_aggregate = _mapping(latest["aggregate"], "latest aggregate")
-    control_rotated = _mapping(control_baseline, "control rotated")
-    league_rotated = _mapping(league_aggregate["baseline_rotated"], "league rotated")
-    league_heldout = _mapping(league_aggregate["heldout_rotated"], "league heldout")
-    latest_heldout = _mapping(latest_aggregate["heldout_rotated"], "latest heldout")
+    league_aggregate = as_mapping(league["aggregate"], "league aggregate")
+    latest_aggregate = as_mapping(latest["aggregate"], "latest aggregate")
+    control_rotated = as_mapping(control_baseline, "control rotated")
+    league_rotated = as_mapping(league_aggregate["baseline_rotated"], "league rotated")
+    league_heldout = as_mapping(league_aggregate["heldout_rotated"], "league heldout")
+    latest_heldout = as_mapping(latest_aggregate["heldout_rotated"], "latest heldout")
     league_warmup_delta_min = league_aggregate["warmup_delta_min"]
-    gates = {
-        "control_reproduces_phase6": (
-            abs(float(control_rotated["win_share"]) - reference_win_share) <= 0.01
-            and abs(float(control_rotated["seat_spread"]) - reference_spread) <= 0.01
+
+    gate_config = GateConfig.from_config(root)
+    gates = evaluate_phase7_gates(
+        control_rotated=control_rotated,
+        league_rotated=league_rotated,
+        league_heldout=league_heldout,
+        latest_heldout=latest_heldout,
+        league_warmup_delta_min=(
+            float(league_warmup_delta_min)
+            if league_warmup_delta_min is not None
+            else None
         ),
-        "league_robustness": (
-            float(league_rotated["win_share"]) >= 0.604
-            and float(league_rotated["seat_spread"]) <= 0.05
-        ),
-        "population_protection": (
-            float(league_heldout["win_share"])
-            >= float(latest_heldout["win_share"]) - 0.05
-            and float(league_heldout["win_share"])
-            >= float(latest_heldout["win_share"]) + 0.03
-        ),
-        "tournament_adaptation": (
-            league_warmup_delta_min is not None
-            and float(league_warmup_delta_min) >= 25.0
-            and float(league_aggregate["final_rating_median"]) >= 1500.0
-        ),
-    }
+        league_aggregate=league_aggregate,
+        reference_win_share=reference_win_share,
+        reference_spread=reference_spread,
+        gates=gate_config,
+    )
     summary = {
         "experiment": str(root["experiment"]),
         "reference": {
@@ -461,7 +395,7 @@ def main() -> None:
         "conditions": condition_results,
         "gates": gates,
     }
-    _write_json(args.output_root / "summary.json", summary)
+    write_json(args.output_root / "summary.json", summary)
     print(f"wrote summary: {args.output_root / 'summary.json'}")
 
 
