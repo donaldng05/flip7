@@ -111,6 +111,12 @@ def main() -> None:
     parser.add_argument(
         "--seed-bases", type=int, nargs=3, default=(21000, 22000, 23000)
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes for evaluation (default: 1)",
+    )
     args = parser.parse_args()
     if args.games_per_seat < 1:
         raise ValueError("games-per-seat must be positive")
@@ -142,6 +148,8 @@ def main() -> None:
             matchups=PHASE6_MATCHUPS,
             first_name="corrected_sparse",
             second_name="potential_win",
+            workers=args.workers,
+            checkpoint_paths=(first_checkpoint, second_checkpoint),
         )
         payload = paired.as_dict()
         per_game = cast(list[Mapping[str, object]], payload["per_game"])

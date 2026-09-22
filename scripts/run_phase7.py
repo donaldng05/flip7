@@ -125,6 +125,8 @@ def _run_seed(
     condition: Mapping[str, object],
     seed: int,
     output_root: Path,
+    *,
+    workers: int = 1,
 ) -> dict[str, object]:
     condition_name = str(condition["name"])
     run_dir = output_root / condition_name / f"seed-{seed}"
@@ -195,6 +197,8 @@ def _run_seed(
         seed_bases=seed_bases,
         observation=observation,
         matchups=matchups,
+        workers=workers,
+        checkpoint_path=checkpoint,
     )
     heldout_roster = baseline_roster | heldout_factories()
     heldout_results = run_rotated_matchups(
@@ -204,6 +208,8 @@ def _run_seed(
         seed_bases=heldout_seed_values,
         observation=observation,
         matchups=heldout_matchups,
+        workers=workers,
+        checkpoint_path=checkpoint,
     )
 
     tournament_values = as_mapping(root["tournament"], "tournament")
@@ -289,8 +295,12 @@ def _run_condition(
     condition: Mapping[str, object],
     seeds: Sequence[int],
     output_root: Path,
+    *,
+    workers: int = 1,
 ) -> dict[str, object]:
-    seed_summaries = [_run_seed(root, condition, seed, output_root) for seed in seeds]
+    seed_summaries = [
+        _run_seed(root, condition, seed, output_root, workers=workers) for seed in seeds
+    ]
     return _aggregate_condition(condition, seeds, seed_summaries)
 
 
@@ -339,6 +349,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/phase7.yaml"))
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/phase7"))
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes for evaluation (default: 1)",
+    )
     args = parser.parse_args()
 
     root = as_mapping(load_config(args.config), "configuration")
@@ -350,7 +366,7 @@ def main() -> None:
         if "name" not in condition:
             raise ValueError(f"conditions[{index}] is missing name")
         condition_results[str(condition["name"])] = _run_condition(
-            root, condition, seeds, args.output_root
+            root, condition, seeds, args.output_root, workers=args.workers
         )
 
     reference = as_mapping(root["phase6_reference"], "phase6_reference")

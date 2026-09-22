@@ -34,6 +34,8 @@ def _run_condition(
     condition: Mapping[str, object],
     seeds: Sequence[int],
     output_root: Path,
+    *,
+    workers: int = 1,
 ) -> dict[str, object]:
     condition_name = str(condition["name"])
     opponents = as_strings(
@@ -83,6 +85,8 @@ def _run_condition(
             seed_bases=seed_bases,
             observation=ObservationFamily(config.observation),
             matchups=matchups,
+            workers=workers,
+            checkpoint_path=checkpoint,
         )
         write_phase6_results(
             evaluation_path,
@@ -125,9 +129,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/phase6.yaml"))
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/phase6"))
+    parser.add_argument("--workers", type=int, default=None)
     args = parser.parse_args()
 
     root = as_mapping(load_config(args.config), "configuration")
+    eval_cfg = as_mapping(root.get("evaluation", {}), "evaluation")
+    workers = (
+        args.workers
+        if args.workers is not None
+        else int(cast(int | str, eval_cfg.get("workers", 1)))
+    )
+    if workers < 1:
+        raise ValueError("workers must be positive")
     seeds = as_ints(root["seeds"], "seeds")
     conditions = as_list(root["conditions"], "conditions")
     condition_results: dict[str, object] = {}
@@ -136,7 +149,7 @@ def main() -> None:
         if "name" not in condition:
             raise ValueError(f"conditions[{index}] is missing name")
         condition_results[str(condition["name"])] = _run_condition(
-            root, condition, seeds, args.output_root
+            root, condition, seeds, args.output_root, workers=workers
         )
 
     reference = as_mapping(root["phase5_reference"], "phase5_reference")

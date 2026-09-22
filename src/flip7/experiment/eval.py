@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import cast
 
 from flip7.agents import Agent
 from flip7.envs import ObservationFamily
@@ -25,9 +26,12 @@ def run_standard_evaluations(
     seed_offset: int,
     observation: ObservationFamily,
     policy_factory: Callable[[], Agent] | None = None,
+    workers: int = 1,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Run rotated baseline and held-out evaluation matchups for a checkpoint."""
     evaluation = as_mapping(root["evaluation"], "evaluation")
+    if workers == 1 and "workers" in evaluation:
+        workers = int(cast(int | str, evaluation["workers"]))
     seed_bases = as_ints(evaluation["seed_bases"], "evaluation.seed_bases")
     heldout_bases = as_ints(
         evaluation["heldout_seed_bases"], "evaluation.heldout_seed_bases"
@@ -44,6 +48,8 @@ def run_standard_evaluations(
         seed_bases=tuple(base + seed_offset for base in seed_bases),
         observation=observation,
         matchups=matchups,
+        workers=workers,
+        checkpoint_path=checkpoint,
     )
     heldout_results = run_rotated_matchups(
         policy,
@@ -52,6 +58,8 @@ def run_standard_evaluations(
         seed_bases=tuple(base + seed_offset for base in heldout_bases),
         observation=observation,
         matchups=heldout_matchups,
+        workers=workers,
+        checkpoint_path=checkpoint,
     )
     return (
         {

@@ -88,3 +88,35 @@ Re-run the smoke command above on `phase-7-resolve` at the recorded
 commit. Expect ~1 min wall-clock and 5 conditions in
 `screening-summary.json`. Do not compare smoke win shares across
 machines; only wall-clock and run completion are frozen here.
+
+## Fast-loop guardrail (frozen reference)
+
+Seat-robustness regression signal for cleanup/speed work, on `main`
+post-dedup. Same optimizer, matchups, and seed bases as
+`configs/phase6.yaml`; reduced to `basic_random` x seeds `[7, 17]` x
+10 updates x 20 games/seat (360 games).
+
+```powershell
+uv run python scripts/run_phase6.py `
+  --config artifacts/guardrail/guardrail.yaml `
+  --output-root artifacts/guardrail/run1
+```
+
+Frozen result (`WALL_SECONDS=52.6`, 2026-09-22, CPU/Windows):
+
+| Seed | Win share | 95% CI | Spread | Seat 0/1/2 | Final | Bust |
+| ---: | ---: | --- | ---: | --- | ---: | ---: |
+| 7 | 57.5% | [50.3, 64.7] | 6.7pp | 53.3/59.2/60.0% | 198.4 | 15.9% |
+| 17 | 69.7% | [63.0, 76.4] | 10.8pp | 63.3/74.2/71.7% | 201.2 | 13.8% |
+| pooled | 63.6% | — | 8.3pp | — | — | — |
+
+Sanity: per-seed spreads sit inside the historical Phase 6 per-seed
+band (~8.5-13.5pp); final scores and bust rates match the 50-update
+`basic_random` profile (~200 final, ~14% bust). Win shares bracket the
+50-update 65.4% pooled result at 1/5 the training budget with wide
+CIs (60 games per seat-block), as expected.
+
+Regression rule: future fast-loop work must reproduce these per-seed
+numbers within CI overlap. Investigate if either seed's win share
+falls outside its frozen CI or spread grows by more than 5pp. Never
+gate on pooled spread alone (see `phase-7-resolution.md`).

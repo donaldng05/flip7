@@ -107,6 +107,7 @@ def _run_mappo(
             policy_factory=lambda path=checkpoint: MAPPOAgent.from_checkpoint(
                 path, deterministic=True
             ),
+            workers=workers,
         )
         participants = tuple(
             [
@@ -279,7 +280,9 @@ def _run_condition(
     if trainer_name == "control":
         trainer: Any = StabilityControlPPOTrainer(config, baseline_names)
     elif trainer_name == "league":
-        trainer = StabilityLeaguePPOTrainer(config, league_config=league_config)
+        trainer = StabilityLeaguePPOTrainer(
+            config, league_config=league_config, workers=workers
+        )
     else:
         raise ValueError(f"unsupported stability trainer: {trainer_name}")
     history = trainer.train(checkpoint)
@@ -303,6 +306,7 @@ def _run_condition(
         games=games,
         seed_offset=seed * 10_000,
         observation=ObservationFamily(observation_value),
+        workers=workers,
     )
     tournament_values = _mapping(root["tournament"], "tournament")
     participants = build_participants(
@@ -534,6 +538,7 @@ def _paired_heldout_comparisons(
     rows: Sequence[Mapping[str, object]],
     *,
     games: int,
+    workers: int = 1,
 ) -> list[dict[str, object]]:
     """Run common-seed held-out comparisons for the diversity gate."""
     latest = {
@@ -576,6 +581,8 @@ def _paired_heldout_comparisons(
             matchups=matchups,
             first_name="response_diverse",
             second_name="latest_only",
+            workers=workers,
+            checkpoint_paths=(diverse_path, latest_path),
         )
         comparisons.append({"seed": seed, **paired.as_dict()})
     _write_json(
@@ -1077,7 +1084,7 @@ def main() -> None:
             {"required": False, "condition": None},
         )
     paired = _paired_heldout_comparisons(
-        root, output_root / args.stage, rows, games=games
+        root, output_root / args.stage, rows, games=games, workers=workers
     )
     aggregate = _aggregate(root, rows, paired)
     _write_json(

@@ -6,13 +6,15 @@ import json
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 from flip7.agents import AgentFactory
 from flip7.envs import ObservationFamily
-from flip7.evaluation.metrics import MatchupMetrics
-from flip7.evaluation.tournament import run_matchup
+from flip7.evaluation.metrics import GameResult, MatchupMetrics
+from flip7.evaluation.tournament import load_worker_policy, run_game, run_matchup
 
 type MatchupPair = tuple[str, str]
 
@@ -24,6 +26,62 @@ PHASE6_MATCHUPS: tuple[MatchupPair, ...] = (
 PHASE6_SEED_BASES: tuple[int, ...] = (10_000, 11_000, 12_000)
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduledRotatedGame:
+    """One scheduled game in a seat-rotated evaluation matrix."""
+
+    matchup_index: int
+    learner_seat: int
+    game_index: int
+    seed: int
+    lineup: tuple[str, ...]
+    observation: ObservationFamily
+    agent_observations: tuple[ObservationFamily, ...]
+
+
+_worker_roster: dict[str, AgentFactory] = {}
+
+
+def _initialize_rotated_worker(
+    checkpoint_paths: tuple[tuple[str, str], ...],
+) -> None:
+    """Initialize worker process with single-threaded torch and cached policies."""
+    global _worker_roster
+    import torch
+
+    torch.set_num_threads(1)
+    from flip7.evaluation.phase7 import heldout_factories
+    from flip7.training.ppo import baseline_factories
+
+    factories: dict[str, AgentFactory] = baseline_factories() | heldout_factories()
+    for name, path_str in checkpoint_paths:
+        policy = load_worker_policy(Path(path_str))
+        factories[name] = lambda policy=policy: policy
+    _worker_roster = factories
+
+
+def _run_rotated_game_in_worker(item: ScheduledRotatedGame) -> GameResult:
+    """Run one rotated game inside a worker process."""
+    factories = tuple(_worker_roster[name] for name in item.lineup)
+    result = run_game(
+        factories,
+        seed=item.seed,
+        observation=item.observation,
+        agent_observations=item.agent_observations,
+    )
+    return GameResult(
+        agents=item.lineup,
+        player_count=result.player_count,
+        winning_player_ids=result.winning_player_ids,
+        final_scores=result.final_scores,
+        round_scores=result.round_scores,
+        rounds=result.rounds,
+        busted_rounds=result.busted_rounds,
+        flip7_events=result.flip7_events,
+        action_counts=result.action_counts,
+    )
+
+
 def run_rotated_matchups(
     ppo_factory: AgentFactory,
     baseline_roster: Mapping[str, AgentFactory],
@@ -32,33 +90,103 @@ def run_rotated_matchups(
     seed_bases: Sequence[int] = PHASE6_SEED_BASES,
     observation: ObservationFamily = ObservationFamily.DECK_AWARE,
     matchups: Sequence[MatchupPair] = PHASE6_MATCHUPS,
+    workers: int = 1,
+    checkpoint_path: Path | str | None = None,
+    checkpoint_paths: Mapping[str, Path | str] | None = None,
 ) -> list[MatchupMetrics]:
     """Evaluate one PPO policy in every seat for each Phase 6 matchup."""
     if len(seed_bases) != len(matchups):
         raise ValueError("one evaluation seed base is required per matchup")
+    if games < 1:
+        raise ValueError("games must be positive")
+    if workers < 1:
+        raise ValueError("workers must be positive")
     roster = dict(baseline_roster) | {"ppo": ppo_factory}
-    results: list[MatchupMetrics] = []
+    if workers == 1:
+        results: list[MatchupMetrics] = []
+        for matchup_index, pair in enumerate(matchups):
+            if len(pair) != 2:
+                raise ValueError("Phase 6 matchups must contain exactly two opponents")
+            for learner_seat in range(3):
+                lineup = list(pair)
+                lineup.insert(learner_seat, "ppo")
+                agent_observations = tuple(
+                    observation
+                    if seat == learner_seat
+                    else ObservationFamily.DECK_AWARE
+                    for seat in range(3)
+                )
+                results.append(
+                    run_matchup(
+                        tuple(lineup),
+                        roster,
+                        games=games,
+                        seed=seed_bases[matchup_index],
+                        observation=observation,
+                        agent_observations=agent_observations,
+                    )
+                )
+        return results
+
+    from flip7.evaluation.phase7 import heldout_factories
+    from flip7.training.ppo import baseline_factories
+
+    known_baselines = set(baseline_factories().keys()) | set(heldout_factories().keys())
+    paths = {k: str(v) for k, v in (checkpoint_paths or {}).items()}
+    if checkpoint_path is not None:
+        paths["ppo"] = str(checkpoint_path)
+
+    metrics_list: list[MatchupMetrics] = []
+    scheduled_games: list[ScheduledRotatedGame] = []
+    lineup_indices: list[int] = []
+
     for matchup_index, pair in enumerate(matchups):
         if len(pair) != 2:
             raise ValueError("Phase 6 matchups must contain exactly two opponents")
         for learner_seat in range(3):
             lineup = list(pair)
             lineup.insert(learner_seat, "ppo")
+            lineup_tuple = tuple(lineup)
+            for name in lineup_tuple:
+                if name not in known_baselines and name not in paths:
+                    raise ValueError(
+                        f"checkpoint_path is required for agent {name!r} "
+                        f"when workers > 1"
+                    )
             agent_observations = tuple(
                 observation if seat == learner_seat else ObservationFamily.DECK_AWARE
                 for seat in range(3)
             )
-            results.append(
-                run_matchup(
-                    tuple(lineup),
-                    roster,
-                    games=games,
-                    seed=seed_bases[matchup_index],
-                    observation=observation,
-                    agent_observations=agent_observations,
+            lineup_idx = len(metrics_list)
+            metrics_list.append(MatchupMetrics(lineup_tuple, 3))
+            for game_index in range(games):
+                seed = seed_bases[matchup_index] + game_index
+                scheduled_games.append(
+                    ScheduledRotatedGame(
+                        matchup_index=matchup_index,
+                        learner_seat=learner_seat,
+                        game_index=game_index,
+                        seed=seed,
+                        lineup=lineup_tuple,
+                        observation=observation,
+                        agent_observations=agent_observations,
+                    )
                 )
-            )
-    return results
+                lineup_indices.append(lineup_idx)
+
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_initialize_rotated_worker,
+        initargs=(tuple(paths.items()),),
+    ) as executor:
+        for lineup_idx, game_result in zip(
+            lineup_indices,
+            executor.map(_run_rotated_game_in_worker, scheduled_games, chunksize=4),
+            strict=True,
+        ):
+            metrics_list[lineup_idx].add(game_result)
+
+    return metrics_list
 
 
 def _confidence_interval(win_share: float, games: int) -> list[float]:
