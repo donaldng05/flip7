@@ -165,12 +165,12 @@ class SeatBalancedPPOTrainer(PPOTrainer):
         dones: list[bool] = []
         values: list[float] = []
         seat_ids: list[int] = []
+        segment_end_indices: list[int] = []
+        segment_next_values: list[float] = []
         reset_seeds: list[int] = []
         observation = np.zeros(self.observation_size, dtype=np.float32)
-        last_learner_id = self.config.player_count - 1
 
         for learner_id, quota in enumerate(quotas):
-            last_learner_id = learner_id
             env: Flip7VsOpponentsEnv | None = None
             try:
                 env = self.new_env(requested_learner_id=learner_id)
@@ -213,19 +213,35 @@ class SeatBalancedPPOTrainer(PPOTrainer):
                         reset_seed = self._rng.randrange(2**31)
                         reset_seeds.append(reset_seed)
                         observation, info = env.reset(seed=reset_seed)
+                segment_end_indices.append(len(rewards) - 1)
+                if dones[-1]:
+                    segment_next_values.append(0.0)
+                else:
+                    with torch.no_grad():
+                        segment_next_values.append(
+                            float(
+                                self._forward(
+                                    torch.as_tensor(
+                                        observation, dtype=torch.float32
+                                    ).unsqueeze(0),
+                                    np.asarray([learner_id], dtype=np.int64),
+                                )[1].item()
+                            )
+                        )
             finally:
                 if env is not None:
                     env.close()
 
         if not observations:
             raise RuntimeError("balanced rollout collected no transitions")
-        with torch.no_grad():
-            next_value = float(
-                self._forward(
-                    torch.as_tensor(observation, dtype=torch.float32).unsqueeze(0),
-                    np.asarray([last_learner_id], dtype=np.int64),
-                )[1].item()
-            )
+        segment_ends = np.zeros(len(rewards), dtype=np.bool_)
+        segment_bootstraps = np.zeros(len(rewards), dtype=np.float32)
+        for index, bootstrap in zip(
+            segment_end_indices, segment_next_values, strict=True
+        ):
+            segment_ends[index] = True
+            segment_bootstraps[index] = bootstrap
+        next_value = float(segment_next_values[-1])
         self.last_rollout_seat_counts = quotas
         self.last_rollout_reset_seeds = tuple(reset_seeds)
         self.rollout_schedule.append(
@@ -245,6 +261,8 @@ class SeatBalancedPPOTrainer(PPOTrainer):
             np.asarray(values, dtype=np.float32),
             next_value,
             np.asarray(seat_ids, dtype=np.int64),
+            segment_ends,
+            segment_bootstraps,
         )
 
 

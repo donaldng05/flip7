@@ -92,6 +92,18 @@ def test_phase7_recipe_config_declares_stable_ppo_settings() -> None:
     assert training["value_clip_epsilon"] == 0.2
 
 
+def test_phase7_resolution_config_preserves_recipe_and_registers_protocol() -> None:
+    config = load_config(Path("configs/phase7-resolve.yaml"))
+    training = cast(Mapping[str, object], config["training"])
+    resolution = cast(Mapping[str, object], config["resolution"])
+
+    assert config["experiment"] == "phase7-resolve"
+    assert training["network"] == "separate"
+    assert training["critic_seat_conditioned"] is True
+    assert resolution["diagnostic_seed_bases"] == [21000, 22000, 23000]
+    assert resolution["intervention"] == "potential_win"
+
+
 def test_load_config_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "missing.yaml")

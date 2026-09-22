@@ -53,6 +53,13 @@ def test_stability_rollout_records_equal_seat_transitions(tmp_path: Path) -> Non
     assert quotas == [2, 2, 2]
     assert sum(quotas) == 6
     assert trainer.league.warmup_anchor is not None
+    rollout = trainer.collect_rollout()
+    assert rollout.segment_ends is not None
+    assert rollout.segment_next_values is not None
+    assert np.flatnonzero(rollout.segment_ends).tolist() == [1, 3, 5]
+    assert rollout.segment_next_values.shape == (6,)
+    assert np.all(np.isfinite(rollout.segment_next_values))
+    assert np.isfinite(trainer.update(rollout)["value_loss"])
     assert history[0]["learning_rate"] == pytest.approx(1e-4)
     assert history[-1]["learning_rate"] == pytest.approx(5e-5)
     assert history[0]["entropy_coefficient"] == pytest.approx(0.03)

@@ -75,6 +75,8 @@ class Rollout:
     values: NDArray[np.float32]
     next_value: float
     seat_ids: NDArray[np.int64] | None = None
+    segment_ends: NDArray[np.bool_] | None = None
+    segment_next_values: NDArray[np.float32] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,15 +99,49 @@ def compute_gae(
     next_value: float,
     gamma: float,
     gae_lambda: float,
+    *,
+    segment_ends: NDArray[np.bool_] | None = None,
+    segment_next_values: NDArray[np.float32] | None = None,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
-    """Compute terminal-aware generalized advantages and returns."""
+    """Compute terminal-aware generalized advantages and returns.
+
+    ``segment_ends`` marks boundaries between independently collected
+    trajectories that were concatenated into one rollout.  At such a
+    boundary, ``segment_next_values`` supplies the bootstrap value for the
+    segment that just ended, and GAE propagation is reset so advantages from
+    a later segment cannot leak into an earlier one.
+    """
+    if (segment_ends is None) != (segment_next_values is None):
+        raise ValueError(
+            "segment_ends and segment_next_values must be supplied together"
+        )
+    if (
+        segment_ends is not None
+        and segment_next_values is not None
+        and (
+            segment_ends.ndim != 1
+            or segment_next_values.ndim != 1
+            or len(segment_ends) != len(rewards)
+            or len(segment_next_values) != len(rewards)
+        )
+    ):
+        raise ValueError("segment metadata must align with rewards")
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_gae = 0.0
     for index in range(len(rewards) - 1, -1, -1):
-        following_value = next_value if index == len(rewards) - 1 else values[index + 1]
+        is_segment_end = segment_ends is not None and bool(segment_ends[index])
+        if is_segment_end:
+            assert segment_next_values is not None
+            following_value = float(segment_next_values[index])
+            following_gae = 0.0
+        else:
+            following_value = (
+                next_value if index == len(rewards) - 1 else values[index + 1]
+            )
+            following_gae = last_gae
         non_terminal = 0.0 if dones[index] else 1.0
         delta = rewards[index] + gamma * following_value * non_terminal - values[index]
-        last_gae = delta + gamma * gae_lambda * non_terminal * last_gae
+        last_gae = delta + gamma * gae_lambda * non_terminal * following_gae
         advantages[index] = last_gae
     return advantages, advantages + values
 
@@ -358,6 +394,8 @@ class PPOTrainer:
             rollout.next_value,
             self.config.gamma,
             self.config.gae_lambda,
+            segment_ends=rollout.segment_ends,
+            segment_next_values=rollout.segment_next_values,
         )
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         tensors = {

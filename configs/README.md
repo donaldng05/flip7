@@ -44,3 +44,8 @@ use a separate output root for the training-only potential-reward ablation.
 For CPU screening, `--skip-full-population-tournament` omits only the
 combinatorial secondary tournament; focused adaptation and all policy
 evaluation remain enabled.
+
+`phase7-resolve.yaml` is the isolated scientific-resolution protocol. It keeps
+the stronger recipe and predeclared gates, while `scripts/diagnose_phase7_stability.py`
+audits immutable prior artifacts and `scripts/compare_phase7_resolution.py`
+performs paired sparse-versus-potential evaluation after corrected screening.
