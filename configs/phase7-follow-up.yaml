@@ -124,3 +124,10 @@ mappo:
   updates: 100
   games_per_seat: 200
   tournament_games_per_lineup: 10
+gates:
+  min_baseline_win_share: 0.604
+  max_seat_spread: 0.05
+  min_heldout_difference: 0.03
+  max_seed_degradation: -0.02
+  min_final_rating: 1500.0
+  min_final_minus_warmup_elo: 25.0
