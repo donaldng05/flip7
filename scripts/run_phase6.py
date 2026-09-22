@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
@@ -18,72 +17,16 @@ from flip7.evaluation import (
     summarize_rotated_results,
     write_phase6_results,
 )
-from flip7.training import PPOConfig, PPOTrainer, baseline_factories, write_history
-
-
-def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    return cast(Mapping[str, object], value)
-
-
-def _list(value: object, name: str) -> list[object]:
-    if not isinstance(value, list):
-        raise ValueError(f"{name} must be a list")
-    return value
-
-
-def _strings(value: object, name: str) -> tuple[str, ...]:
-    values = _list(value, name)
-    if not all(isinstance(item, str) for item in values):
-        raise ValueError(f"{name} must contain only strings")
-    return tuple(cast(str, item) for item in values)
-
-
-def _integers(value: object, name: str) -> tuple[int, ...]:
-    values = _list(value, name)
-    if not all(isinstance(item, int) for item in values):
-        raise ValueError(f"{name} must contain only integers")
-    return tuple(cast(int, item) for item in values)
-
-
-def _matchups(value: object) -> tuple[tuple[str, str], ...]:
-    pairs: list[tuple[str, str]] = []
-    for index, item in enumerate(_list(value, "evaluation.matchups")):
-        pair = _strings(item, f"evaluation.matchups[{index}]")
-        if len(pair) != 2:
-            raise ValueError("each evaluation matchup must contain two opponents")
-        pairs.append((pair[0], pair[1]))
-    if not pairs:
-        raise ValueError("evaluation.matchups must not be empty")
-    return tuple(pairs)
-
-
-def _config_for_condition(
-    root: Mapping[str, object], condition: Mapping[str, object], seed: int
-) -> PPOConfig:
-    environment = _mapping(root["env"], "env")
-    training = _mapping(root["training"], "training")
-    config_values: dict[str, object] = dict(training)
-    config_values.update(
-        {
-            "seed": seed,
-            "player_count": int(root["players"]),
-            "learner_id": int(environment["learner_id"]),
-            "learner_seat_mode": str(condition["learner_seat_mode"]),
-            "observation": str(condition["observation"]),
-            "reward": str(environment["reward"]),
-        }
-    )
-    config_values.pop("algorithm", None)
-    return PPOConfig(**config_values)
-
-
-def _write_json(path: Path, payload: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+from flip7.experiment import (
+    as_ints,
+    as_list,
+    as_mapping,
+    as_pairs,
+    as_strings,
+    training_config,
+    write_json,
+)
+from flip7.training import PPOTrainer, baseline_factories, write_history
 
 
 def _run_condition(
@@ -93,18 +36,23 @@ def _run_condition(
     output_root: Path,
 ) -> dict[str, object]:
     condition_name = str(condition["name"])
-    opponents = _strings(
-        _mapping(root["opponents"], "opponents")["training"], "opponents.training"
+    opponents = as_strings(
+        as_mapping(root["opponents"], "opponents")["training"], "opponents.training"
     )
-    evaluation = _mapping(root["evaluation"], "evaluation")
+    evaluation = as_mapping(root["evaluation"], "evaluation")
     games = int(evaluation["games_per_seat"])
-    seed_bases = _integers(evaluation["seed_bases"], "evaluation.seed_bases")
-    matchups = _matchups(evaluation["matchups"])
+    seed_bases = as_ints(evaluation["seed_bases"], "evaluation.seed_bases")
+    matchups = as_pairs(evaluation["matchups"], "evaluation.matchups")
     all_results = []
     seed_summaries: list[dict[str, object]] = []
 
     for seed in seeds:
-        config = _config_for_condition(root, condition, seed)
+        config = training_config(
+            root,
+            seed,
+            observation_override=str(condition["observation"]),
+            learner_seat_mode_override=str(condition["learner_seat_mode"]),
+        )
         run_dir = output_root / condition_name / f"seed-{seed}"
         checkpoint = run_dir / "checkpoint.pt"
         history_path = run_dir / "training.json"
@@ -149,7 +97,7 @@ def _run_condition(
             results,
         )
         summary = summarize_rotated_results(results)
-        _write_json(
+        write_json(
             manifest_path,
             metadata
             | {
@@ -179,19 +127,19 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/phase6"))
     args = parser.parse_args()
 
-    root = _mapping(load_config(args.config), "configuration")
-    seeds = _integers(root["seeds"], "seeds")
-    conditions = _list(root["conditions"], "conditions")
+    root = as_mapping(load_config(args.config), "configuration")
+    seeds = as_ints(root["seeds"], "seeds")
+    conditions = as_list(root["conditions"], "conditions")
     condition_results: dict[str, object] = {}
     for index, condition_value in enumerate(conditions):
-        condition = _mapping(condition_value, f"conditions[{index}]")
+        condition = as_mapping(condition_value, f"conditions[{index}]")
         if "name" not in condition:
             raise ValueError(f"conditions[{index}] is missing name")
         condition_results[str(condition["name"])] = _run_condition(
             root, condition, seeds, args.output_root
         )
 
-    reference = _mapping(root["phase5_reference"], "phase5_reference")
+    reference = as_mapping(root["phase5_reference"], "phase5_reference")
     reference_win_share = float(reference["pooled_win_share"])
     reference_spread = float(reference["seat_spread"])
     minimum_improvement = float(reference["minimum_improvement"])
@@ -233,7 +181,7 @@ def main() -> None:
         "conditions": condition_results,
         "best_randomized_condition": best_name,
     }
-    _write_json(args.output_root / "summary.json", summary)
+    write_json(args.output_root / "summary.json", summary)
     print(f"wrote summary: {args.output_root / 'summary.json'}")
 
 

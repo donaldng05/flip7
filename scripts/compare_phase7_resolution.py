@@ -6,9 +6,8 @@ import argparse
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
-from flip7.agents import PPOAgent
 from flip7.config.loader import load_config
 from flip7.envs import ObservationFamily
 from flip7.evaluation import (
@@ -16,6 +15,7 @@ from flip7.evaluation import (
     run_paired_rotated_evaluation,
 )
 from flip7.evaluation.diagnostics import resolve_manifest_files
+from flip7.experiment import as_mapping, cached_policy
 from flip7.training import baseline_factories
 
 REQUIRED_FILES = (
@@ -29,10 +29,8 @@ REQUIRED_FILES = (
 )
 
 
-def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    return cast(Mapping[str, object], value)
+_mapping = as_mapping
+_cached_policy = cached_policy
 
 
 def _manifest_path(root: Path, condition: str, seed: int) -> Path:
@@ -65,18 +63,6 @@ def _checkpoint(root: Path, condition: str, seed: int) -> tuple[Path, str]:
     if not isinstance(observation, str):
         raise ValueError("resolution manifest is missing observation")
     return files["checkpoint"], observation
-
-
-def _cached_policy(path: Path) -> Any:
-    policy: PPOAgent | None = None
-
-    def factory() -> PPOAgent:
-        nonlocal policy
-        if policy is None:
-            policy = PPOAgent.from_checkpoint(path, deterministic=True)
-        return policy
-
-    return factory
 
 
 def _aggregate_games(per_game: Sequence[Mapping[str, object]]) -> dict[str, object]:

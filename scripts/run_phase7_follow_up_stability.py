@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -12,7 +11,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from flip7 import __version__
-from flip7.agents import PPOAgent
 from flip7.config.loader import load_config
 from flip7.envs import ObservationFamily
 from flip7.evaluation import (
@@ -24,16 +22,30 @@ from flip7.evaluation import (
     non_transitive_cycles,
     run_paired_rotated_evaluation,
     run_paired_round_robin,
-    run_rotated_matchups,
     schedule_as_dict,
-    summarize_rotated_results,
     validate_followup_manifest,
 )
 from flip7.evaluation.phase7 import TournamentParticipant
+from flip7.experiment import (
+    GateConfig,
+    as_ints,
+    as_list,
+    as_mapping,
+    as_pairs,
+    as_strings,
+    build_participants,
+    cached_policy,
+    is_candidate_robust,
+    mappo_config,
+    run_standard_evaluations,
+    sha256_file,
+    training_config,
+    write_json,
+    write_stage_summary,
+)
 from flip7.training import (
     FollowUpLeagueConfig,
     MAPPOAgent,
-    MAPPOConfig,
     MAPPOTrainer,
     StabilityControlPPOTrainer,
     StabilityLeaguePPOTrainer,
@@ -41,87 +53,19 @@ from flip7.training import (
     write_history,
     write_mappo_history,
 )
-from flip7.training.ppo import PPOConfig
 
-
-def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    return cast(Mapping[str, object], value)
-
-
-def _list(value: object, name: str) -> list[object]:
-    if not isinstance(value, list):
-        raise ValueError(f"{name} must be a list")
-    return value
-
-
-def _ints(value: object, name: str) -> tuple[int, ...]:
-    values = _list(value, name)
-    if not all(isinstance(item, int) and not isinstance(item, bool) for item in values):
-        raise ValueError(f"{name} must contain only integers")
-    return tuple(cast(int, item) for item in values)
-
-
-def _strings(value: object, name: str) -> tuple[str, ...]:
-    values = _list(value, name)
-    if not all(isinstance(item, str) for item in values):
-        raise ValueError(f"{name} must contain only strings")
-    return tuple(cast(str, item) for item in values)
-
-
-def _pairs(value: object, name: str) -> tuple[tuple[str, str], ...]:
-    pairs: list[tuple[str, str]] = []
-    for index, item in enumerate(_list(value, name)):
-        pair = _strings(item, f"{name}[{index}]")
-        if len(pair) != 2:
-            raise ValueError(f"{name} entries must contain two names")
-        pairs.append((pair[0], pair[1]))
-    if not pairs:
-        raise ValueError(f"{name} must not be empty")
-    return tuple(pairs)
-
-
-def _write_json(path: Path, value: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _training_config(
-    root: Mapping[str, object],
-    seed: int,
-    *,
-    updates: int,
-    observation_override: str | None = None,
-    training_override: Mapping[str, object] | None = None,
-) -> PPOConfig:
-    environment = _mapping(root["env"], "env")
-    training = dict(_mapping(root["training"], "training"))
-    training.pop("algorithm", None)
-    training.update(
-        {
-            "seed": seed,
-            "updates": updates,
-            "player_count": int(root["players"]),
-            "learner_id": int(environment["learner_id"]),
-            "learner_seat_mode": str(environment["learner_seat_mode"]),
-            "observation": observation_override or str(environment["observation"]),
-            "reward": str(environment["reward"]),
-        }
-    )
-    if training_override is not None:
-        training.update(training_override)
-    return PPOConfig(**training)
+_mapping = as_mapping
+_list = as_list
+_ints = as_ints
+_strings = as_strings
+_pairs = as_pairs
+_write_json = write_json
+_write_stage_summary = write_stage_summary
+_sha256 = sha256_file
+_training_config = training_config
+_mappo_config = mappo_config
+_cached_policy = cached_policy
+_evaluate = run_standard_evaluations
 
 
 def _league_config(
@@ -133,129 +77,6 @@ def _league_config(
     opponents = _mapping(root["opponents"], "opponents")
     defaults["baseline_names"] = _strings(opponents["training"], "opponents.training")
     return FollowUpLeagueConfig(**defaults)
-
-
-def _cached_policy(path: Path) -> Any:
-    policy: PPOAgent | None = None
-
-    def factory() -> PPOAgent:
-        nonlocal policy
-        if policy is None:
-            policy = PPOAgent.from_checkpoint(path, deterministic=True)
-        return policy
-
-    return factory
-
-
-def _participants(
-    checkpoint: Path,
-    observation: ObservationFamily,
-    snapshots: Sequence[Any],
-    warmup: Any | None,
-    *,
-    include_snapshots: bool,
-) -> tuple[TournamentParticipant, ...]:
-    participants = [
-        TournamentParticipant(name, factory, ObservationFamily.DECK_AWARE)
-        for name, factory in baseline_factories().items()
-    ]
-    participants.append(
-        TournamentParticipant("final", _cached_policy(checkpoint), observation)
-    )
-    if include_snapshots:
-        participants.extend(
-            TournamentParticipant(
-                snapshot.policy_id,
-                _cached_policy(snapshot.path),
-                snapshot.observation,
-            )
-            for snapshot in snapshots
-        )
-    if warmup is not None and all(
-        participant.name != warmup.policy_id for participant in participants
-    ):
-        participants.append(
-            TournamentParticipant(
-                warmup.policy_id,
-                _cached_policy(warmup.path),
-                warmup.observation,
-            )
-        )
-    return tuple(participants)
-
-
-def _evaluate(
-    root: Mapping[str, object],
-    checkpoint: Path,
-    *,
-    games: int,
-    seed_offset: int,
-    observation: ObservationFamily,
-    policy_factory: Any | None = None,
-) -> tuple[dict[str, object], dict[str, object]]:
-    evaluation = _mapping(root["evaluation"], "evaluation")
-    seed_bases = _ints(evaluation["seed_bases"], "evaluation.seed_bases")
-    heldout_bases = _ints(
-        evaluation["heldout_seed_bases"], "evaluation.heldout_seed_bases"
-    )
-    matchups = _pairs(evaluation["matchups"], "evaluation.matchups")
-    heldout_matchups = _pairs(
-        evaluation["heldout_matchups"], "evaluation.heldout_matchups"
-    )
-    policy = _cached_policy(checkpoint) if policy_factory is None else policy_factory
-    baseline_results = run_rotated_matchups(
-        policy,
-        baseline_factories(),
-        games=games,
-        seed_bases=tuple(base + seed_offset for base in seed_bases),
-        observation=observation,
-        matchups=matchups,
-    )
-    heldout_results = run_rotated_matchups(
-        policy,
-        baseline_factories() | heldout_factories(),
-        games=games,
-        seed_bases=tuple(base + seed_offset for base in heldout_bases),
-        observation=observation,
-        matchups=heldout_matchups,
-    )
-    return (
-        {
-            "matchups": [result.as_dict() for result in baseline_results],
-            "summary": summarize_rotated_results(baseline_results),
-        },
-        {
-            "matchups": [result.as_dict() for result in heldout_results],
-            "summary": summarize_rotated_results(heldout_results),
-        },
-    )
-
-
-def _mappo_config(
-    root: Mapping[str, object], seed: int, *, updates: int
-) -> MAPPOConfig:
-    environment = _mapping(root["env"], "env")
-    training = dict(_mapping(root["training"], "training"))
-    training.pop("algorithm", None)
-    for key in (
-        "network",
-        "critic_seat_conditioned",
-        "learning_rate_end",
-        "entropy_coefficient_end",
-        "target_kl",
-        "value_clip_epsilon",
-    ):
-        training.pop(key, None)
-    training.update(
-        {
-            "seed": seed,
-            "updates": updates,
-            "player_count": int(root["players"]),
-            "observation": str(environment["observation"]),
-            "reward": str(environment["reward"]),
-        }
-    )
-    return MAPPOConfig(**training)
 
 
 def _run_mappo(
@@ -484,7 +305,7 @@ def _run_condition(
         observation=ObservationFamily(observation_value),
     )
     tournament_values = _mapping(root["tournament"], "tournament")
-    participants = _participants(
+    participants = build_participants(
         checkpoint,
         ObservationFamily(observation_value),
         snapshots,
@@ -522,7 +343,7 @@ def _run_condition(
     full: Any | None = None
     full_schedule: tuple[Any, ...] = ()
     if run_full_tournament:
-        full_participants = _participants(
+        full_participants = build_participants(
             checkpoint,
             ObservationFamily(observation_value),
             snapshots,
@@ -808,7 +629,7 @@ def _aggregate(
     latest = {int(row["seed"]): row for row in grouped.get(latest_name, [])}
     diverse = {int(row["seed"]): row for row in grouped.get(diverse_name, [])}
     paired_by_seed = {int(item["seed"]): item for item in paired}
-    gate_values = _mapping(root["gates"], "gates")
+    gate_values = GateConfig.from_config(root)
     differences = (
         [float(item["mean_difference"]) for item in paired]
         if paired
@@ -848,10 +669,10 @@ def _aggregate(
             if baseline_js
             else (1_000_000.0 if selected_js > 0.0 else 0.0)
         )
-        behavior_passed = js_ratio >= float(
-            gate_values["min_behavioral_js_ratio"]
-        ) and selected_disagreement - baseline_disagreement >= float(
-            gate_values["min_action_disagreement_delta"]
+        behavior_passed = (
+            js_ratio >= gate_values.min_behavioral_js_ratio
+            and selected_disagreement - baseline_disagreement
+            >= gate_values.min_action_disagreement_delta
         )
         matchup_differences: dict[str, list[float]] = {}
         for comparison in paired:
@@ -884,9 +705,9 @@ def _aggregate(
             "positive_matchup_count": matchup_support,
             "behavior_passed": behavior_passed,
             "passed": sum(differences) / len(differences)
-            >= float(gate_values["min_heldout_difference"])
+            >= gate_values.min_heldout_difference
             and _normal_interval(differences)[0] > 0.0
-            and min(differences) >= float(gate_values["max_seed_degradation"])
+            and min(differences) >= gate_values.max_seed_degradation
             and behavior_passed
             and matchup_support >= min(2, len(matchup_means)),
         }
@@ -897,13 +718,12 @@ def _aggregate(
         "passed": bool(selected)
         and all(
             float(cast(Mapping[str, object], row["baseline"])["win_share"])
-            >= float(gate_values["min_baseline_win_share"])
+            >= gate_values.min_baseline_win_share
             and float(cast(Mapping[str, object], row["baseline"])["seat_spread"])
-            <= float(gate_values["max_seat_spread"])
-            and float(row.get("final_rating") or 0.0)
-            >= float(gate_values["min_final_rating"])
+            <= gate_values.max_seat_spread
+            and float(row.get("final_rating") or 0.0) >= gate_values.min_final_rating
             and float(row.get("final_minus_warmup_elo") or 0.0)
-            >= float(gate_values["min_final_minus_warmup_elo"])
+            >= gate_values.min_final_minus_warmup_elo
             and _direct_delta(row) > 0.0
             for row in selected
         ),
@@ -929,12 +749,11 @@ def _selected_condition_name(
     root: Mapping[str, object], rows: Sequence[Mapping[str, object]]
 ) -> str:
     """Select the fallback only when balanced-basic seat robustness requires it."""
+    gate_config = GateConfig.from_config(root)
     response_name = "balanced_response_diverse"
     response_rows = [row for row in rows if row.get("condition") == response_name]
     if response_rows and all(
-        float(cast(Mapping[str, object], row["baseline"])["seat_spread"]) <= 0.05
-        and float(cast(Mapping[str, object], row["baseline"])["win_share"]) >= 0.604
-        for row in response_rows
+        is_candidate_robust(row, gate_config) for row in response_rows
     ):
         return response_name
     fallback = _mapping(root["fallback"], "fallback")
@@ -960,13 +779,9 @@ def _fallback_is_required(
     response_rows = [
         row for row in rows if row.get("condition") == "balanced_response_diverse"
     ]
-    gates = _mapping(root["gates"], "gates")
+    gate_config = GateConfig.from_config(root)
     return not response_rows or any(
-        float(cast(Mapping[str, object], row["baseline"])["seat_spread"])
-        > float(gates["max_seat_spread"])
-        or float(cast(Mapping[str, object], row["baseline"])["win_share"])
-        < float(gates["min_baseline_win_share"])
-        for row in response_rows
+        not is_candidate_robust(row, gate_config) for row in response_rows
     )
 
 

@@ -24,6 +24,7 @@ from flip7.evaluation.diagnostics import (
     reference_reproduces,
     validate_seed_plan,
 )
+from flip7.experiment import GateConfig, as_mapping
 from flip7.training import baseline_factories
 
 DEFAULT_AUDIT = Path("artifacts/phase7-resolve/diagnostic-sparse-corrected.json")
@@ -31,11 +32,7 @@ DEFAULT_CONFIG = Path("configs/phase7-resolve.yaml")
 DEFAULT_REFERENCE_SUMMARY = Path("artifacts/phase6/summary.json")
 DEFAULT_OUTPUT = Path("artifacts/phase7-resolve/calibration-v2.json")
 
-
-def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    return cast(Mapping[str, object], value)
+_mapping = as_mapping
 
 
 def _read(path: Path, name: str) -> Mapping[str, object]:
@@ -148,7 +145,7 @@ def main() -> None:
 
     config = _mapping(load_config(args.config), "phase7-resolve configuration")
     resolution = _mapping(config["resolution"], "resolution")
-    gates = _mapping(config["gates"], "gates")
+    gate_config = GateConfig.from_config(config)
     tolerance = float(
         args.tolerance
         if args.tolerance is not None
@@ -157,7 +154,7 @@ def main() -> None:
     max_seat_spread = float(
         args.max_seat_spread
         if args.max_seat_spread is not None
-        else gates.get("max_seat_spread", 0.05)
+        else gate_config.max_seat_spread
     )
 
     audit = _read(args.audit, "diagnostic audit")

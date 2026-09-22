@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -19,21 +18,33 @@ from flip7.evaluation import (
     analyze_snapshots,
     build_paired_schedule,
     direct_final_warmup_comparison,
-    heldout_factories,
     matchup_win_share_matrix,
     non_transitive_cycles,
     run_paired_round_robin,
-    run_rotated_matchups,
     schedule_as_dict,
-    summarize_rotated_results,
     validate_followup_manifest,
 )
 from flip7.evaluation.phase7 import TournamentParticipant
+from flip7.experiment import (
+    GateConfig,
+    as_ints,
+    as_list,
+    as_mapping,
+    as_pairs,
+    as_strings,
+    build_participants,
+    cached_policy,
+    mappo_config,
+    run_standard_evaluations,
+    sha256_file,
+    training_config,
+    write_json,
+    write_stage_summary,
+)
 from flip7.training import (
     DiverseLeaguePPOTrainer,
     FollowUpLeagueConfig,
     MAPPOAgent,
-    MAPPOConfig,
     MAPPOTrainer,
     baseline_factories,
     write_followup_population,
@@ -42,116 +53,17 @@ from flip7.training import (
 )
 from flip7.training.ppo import PPOConfig, PPOTrainer
 
-
-def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    return cast(Mapping[str, object], value)
-
-
-def _list(value: object, name: str) -> list[object]:
-    if not isinstance(value, list):
-        raise ValueError(f"{name} must be a list")
-    return value
-
-
-def _ints(value: object, name: str) -> tuple[int, ...]:
-    values = _list(value, name)
-    if not all(isinstance(item, int) and not isinstance(item, bool) for item in values):
-        raise ValueError(f"{name} must contain only integers")
-    return tuple(cast(int, item) for item in values)
-
-
-def _strings(value: object, name: str) -> tuple[str, ...]:
-    values = _list(value, name)
-    if not all(isinstance(item, str) for item in values):
-        raise ValueError(f"{name} must contain only strings")
-    return tuple(cast(str, item) for item in values)
-
-
-def _pairs(value: object, name: str) -> tuple[tuple[str, str], ...]:
-    pairs: list[tuple[str, str]] = []
-    for index, item in enumerate(_list(value, name)):
-        pair = _strings(item, f"{name}[{index}]")
-        if len(pair) != 2:
-            raise ValueError(f"{name} entries must contain two names")
-        pairs.append((pair[0], pair[1]))
-    if not pairs:
-        raise ValueError(f"{name} must not be empty")
-    return tuple(pairs)
-
-
-def _write_json(path: Path, value: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-
-
-def _write_stage_summary(
-    output_root: Path, stage: str, payload: Mapping[str, object]
-) -> None:
-    """Write both a stage summary and the stable follow-up summary."""
-    _write_json(output_root / f"{stage}-summary.json", payload)
-    summary_path = output_root / "summary.json"
-    all_stages: dict[str, object] = {}
-    if summary_path.is_file():
-        existing = json.loads(summary_path.read_text(encoding="utf-8"))
-        if isinstance(existing, dict) and isinstance(existing.get("stages"), dict):
-            all_stages.update(cast(dict[str, object], existing["stages"]))
-    all_stages[stage] = dict(payload)
-    _write_json(
-        summary_path,
-        {"experiment": payload["experiment"], "stages": all_stages},
-    )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _training_config(
-    root: Mapping[str, object], seed: int, *, updates: int | None = None
-) -> PPOConfig:
-    environment = _mapping(root["env"], "env")
-    training = dict(_mapping(root["training"], "training"))
-    training.pop("algorithm", None)
-    if updates is not None:
-        training["updates"] = updates
-    training.update(
-        {
-            "seed": seed,
-            "player_count": int(root["players"]),
-            "learner_id": int(environment["learner_id"]),
-            "learner_seat_mode": str(environment["learner_seat_mode"]),
-            "observation": str(environment["observation"]),
-            "reward": str(environment["reward"]),
-        }
-    )
-    return PPOConfig(**training)
-
-
-def _mappo_config(
-    root: Mapping[str, object], seed: int, *, updates: int | None = None
-) -> MAPPOConfig:
-    environment = _mapping(root["env"], "env")
-    training = dict(_mapping(root["training"], "training"))
-    training.pop("algorithm", None)
-    if updates is not None:
-        training["updates"] = updates
-    training.update(
-        {
-            "seed": seed,
-            "player_count": int(root["players"]),
-            "observation": str(environment["observation"]),
-            "reward": str(environment["reward"]),
-        }
-    )
-    return MAPPOConfig(**training)
+_mapping = as_mapping
+_list = as_list
+_ints = as_ints
+_strings = as_strings
+_pairs = as_pairs
+_write_json = write_json
+_write_stage_summary = write_stage_summary
+_sha256 = sha256_file
+_training_config = training_config
+_mappo_config = mappo_config
+_cached_policy = cached_policy
 
 
 def _condition_config(
@@ -168,59 +80,6 @@ def _condition_config(
     return config, FollowUpLeagueConfig(**population)
 
 
-def _participants(
-    checkpoint: Path,
-    snapshots: Sequence[Any],
-    observation: ObservationFamily,
-    *,
-    warmup: Any | None = None,
-    include_snapshots: bool = True,
-) -> tuple[TournamentParticipant, ...]:
-    def cached_policy(path: Path) -> Any:
-        policy_instance: PPOAgent | None = None
-
-        def factory() -> PPOAgent:
-            nonlocal policy_instance
-            if policy_instance is None:
-                policy_instance = PPOAgent.from_checkpoint(path, deterministic=True)
-            return policy_instance
-
-        return factory
-
-    roster = baseline_factories()
-    participants = [
-        TournamentParticipant(name, factory, ObservationFamily.DECK_AWARE)
-        for name, factory in roster.items()
-    ]
-    participants.append(
-        TournamentParticipant(
-            "final",
-            cached_policy(checkpoint),
-            observation,
-        )
-    )
-    if include_snapshots:
-        for snapshot in snapshots:
-            participants.append(
-                TournamentParticipant(
-                    snapshot.policy_id,
-                    cached_policy(snapshot.path),
-                    snapshot.observation,
-                )
-            )
-    if warmup is not None and all(
-        participant.name != warmup.policy_id for participant in participants
-    ):
-        participants.append(
-            TournamentParticipant(
-                warmup.policy_id,
-                cached_policy(warmup.path),
-                warmup.observation,
-            )
-        )
-    return tuple(participants)
-
-
 def _rating_from_elo(elo: Mapping[str, object], name: str) -> float | None:
     for value in _list(elo["ratings"], "tournament ratings"):
         row = _mapping(value, "tournament rating")
@@ -229,8 +88,13 @@ def _rating_from_elo(elo: Mapping[str, object], name: str) -> float | None:
     return None
 
 
-def _aggregate_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+def _aggregate_rows(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    gate_config: GateConfig | None = None,
+) -> dict[str, object]:
     """Aggregate trainable rows and evaluate predeclared follow-up gates."""
+    gates_cfg = gate_config or GateConfig()
     grouped: dict[str, list[Mapping[str, object]]] = {}
     for row in rows:
         if isinstance(row.get("baseline"), dict) and isinstance(
@@ -294,9 +158,11 @@ def _aggregate_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
                     mean_difference - 1.96 * standard_error,
                     mean_difference + 1.96 * standard_error,
                 ],
-                "passed": mean_difference >= 0.03
-                and mean_difference - 1.96 * standard_error > 0
-                and min(differences) >= -0.02,
+                "passed": (
+                    mean_difference >= gates_cfg.min_heldout_difference
+                    and mean_difference - 1.96 * standard_error > 0
+                    and min(differences) >= gates_cfg.max_seed_degradation
+                ),
             }
     selected = "novelty_dense" if "novelty_dense" in grouped else None
     if selected is not None:
@@ -309,10 +175,11 @@ def _aggregate_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         gates["stable_tournament_adaptation"] = {
             "passed": bool(final_deltas)
             and all(
-                float(row["baseline"]["win_share"]) >= 0.604
-                and float(row["baseline"]["seat_spread"]) <= 0.05
-                and float(row.get("final_rating", 0.0)) >= 1500.0
-                and float(row.get("final_minus_warmup_elo", 0.0)) >= 25.0
+                float(row["baseline"]["win_share"]) >= gates_cfg.min_baseline_win_share
+                and float(row["baseline"]["seat_spread"]) <= gates_cfg.max_seat_spread
+                and float(row.get("final_rating", 0.0)) >= gates_cfg.min_final_rating
+                and float(row.get("final_minus_warmup_elo", 0.0))
+                >= gates_cfg.min_final_minus_warmup_elo
                 for row in selected_rows
             ),
             "all_seed_final_minus_warmup_elo": final_deltas,
@@ -335,61 +202,14 @@ def _run_evaluation(
     updates: int,
     agent_factory: Any | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    evaluation = _mapping(root["evaluation"], "evaluation")
-    seed_bases = _ints(evaluation["seed_bases"], "evaluation.seed_bases")
-    heldout_bases = _ints(
-        evaluation["heldout_seed_bases"], "evaluation.heldout_seed_bases"
-    )
-    matchups = _pairs(evaluation["matchups"], "evaluation.matchups")
-    heldout_matchups = _pairs(
-        evaluation["heldout_matchups"], "evaluation.heldout_matchups"
-    )
     observation = ObservationFamily(str(_mapping(root["env"], "env")["observation"]))
-    if agent_factory is None:
-        policy_instance: PPOAgent | None = None
-
-        def policy() -> PPOAgent:
-            nonlocal policy_instance
-            if policy_instance is None:
-                policy_instance = PPOAgent.from_checkpoint(
-                    checkpoint, deterministic=True
-                )
-            return policy_instance
-    else:
-        policy_instance: Any | None = None
-
-        def policy() -> Any:
-            nonlocal policy_instance
-            if policy_instance is None:
-                policy_instance = agent_factory(checkpoint)
-            return policy_instance
-
-    roster = baseline_factories()
-    baseline_results = run_rotated_matchups(
-        policy,
-        roster,
+    return run_standard_evaluations(
+        root,
+        checkpoint,
         games=games,
-        seed_bases=tuple(base + seed_offset for base in seed_bases),
+        seed_offset=seed_offset,
         observation=observation,
-        matchups=matchups,
-    )
-    heldout_results = run_rotated_matchups(
-        policy,
-        roster | heldout_factories(),
-        games=games,
-        seed_bases=tuple(base + seed_offset for base in heldout_bases),
-        observation=observation,
-        matchups=heldout_matchups,
-    )
-    return (
-        {
-            "matchups": [result.as_dict() for result in baseline_results],
-            "summary": summarize_rotated_results(baseline_results),
-        },
-        {
-            "matchups": [result.as_dict() for result in heldout_results],
-            "summary": summarize_rotated_results(heldout_results),
-        },
+        policy_factory=agent_factory,
     )
 
 
@@ -448,7 +268,9 @@ def _run_training_condition(
         root, checkpoint, games, seed * 10_000, updates=updates
     )
     observation = ObservationFamily(config.observation)
-    participants = _participants(checkpoint, snapshots, observation, warmup=warmup)
+    participants = build_participants(
+        checkpoint, observation, snapshots, warmup, include_snapshots=True
+    )
     checkpoint_paths = {"final": checkpoint}
     checkpoint_paths.update(
         {snapshot.policy_id: snapshot.path for snapshot in snapshots}
@@ -905,7 +727,7 @@ def main() -> None:
             "seeds": list(seeds),
             "updates": updates,
             "results": rows,
-            **_aggregate_rows(rows),
+            **_aggregate_rows(rows, gate_config=GateConfig.from_config(root)),
         },
     )
 
