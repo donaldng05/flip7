@@ -487,50 +487,51 @@ class DiverseLeaguePPOTrainer(PPOTrainer):
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
         if checkpoint is None:
             raise ValueError("DiverseLeaguePPOTrainer requires a checkpoint path")
-        history: list[dict[str, float]] = []
-        snapshot_dir = checkpoint.parent / "checkpoints"
-        for update in range(1, self.config.updates + 1):
-            self.league.set_training_update(update)
-            rollout = self.collect_rollout()
-            metrics = self.update(rollout)
-            metrics["update"] = float(update)
-            metrics["mean_reward"] = float(rollout.rewards.mean())
-            self.save_checkpoint(checkpoint, update)
-            if update >= self.league.config.warmup_updates and (
-                update == self.league.config.warmup_updates
-                or (update - self.league.config.warmup_updates)
-                % self.league.config.archive_interval
-                == 0
-            ):
-                snapshot_path = snapshot_dir / f"update-{update:04d}.pt"
-                self.save_checkpoint(
-                    snapshot_path,
-                    update,
-                    metadata={
-                        "policy_id": f"seed-{self.config.seed}-update-{update:04d}",
-                        "source_seed": self.config.seed,
-                        "snapshot_update": update,
-                        "observation": self.config.observation,
-                        "observation_size": self.observation_size,
-                        "action_size": self.action_size,
-                    },
+        with self.worker_pool_scope():
+            history: list[dict[str, float]] = []
+            snapshot_dir = checkpoint.parent / "checkpoints"
+            for update in range(1, self.config.updates + 1):
+                self.league.set_training_update(update)
+                rollout = self.collect_rollout()
+                metrics = self.update(rollout)
+                metrics["update"] = float(update)
+                metrics["mean_reward"] = float(rollout.rewards.mean())
+                self.save_checkpoint(checkpoint, update)
+                if update >= self.league.config.warmup_updates and (
+                    update == self.league.config.warmup_updates
+                    or (update - self.league.config.warmup_updates)
+                    % self.league.config.archive_interval
+                    == 0
+                ):
+                    snapshot_path = snapshot_dir / f"update-{update:04d}.pt"
+                    self.save_checkpoint(
+                        snapshot_path,
+                        update,
+                        metadata={
+                            "policy_id": f"seed-{self.config.seed}-update-{update:04d}",
+                            "source_seed": self.config.seed,
+                            "snapshot_update": update,
+                            "observation": self.config.observation,
+                            "observation_size": self.observation_size,
+                            "action_size": self.action_size,
+                        },
+                    )
+                    self.league.register_snapshot(
+                        snapshot_path, update=update, seed=self.config.seed
+                    )
+                total = sum(self.league.exposure.values())
+                learned = sum(
+                    count
+                    for key, count in self.league.exposure.items()
+                    if key.startswith("snapshot:")
                 )
-                self.league.register_snapshot(
-                    snapshot_path, update=update, seed=self.config.seed
+                metrics["population_size"] = float(len(self.league.snapshots))
+                metrics["archived_population_size"] = float(
+                    len(self.league.archived_snapshots)
                 )
-            total = sum(self.league.exposure.values())
-            learned = sum(
-                count
-                for key, count in self.league.exposure.items()
-                if key.startswith("snapshot:")
-            )
-            metrics["population_size"] = float(len(self.league.snapshots))
-            metrics["archived_population_size"] = float(
-                len(self.league.archived_snapshots)
-            )
-            metrics["learned_opponent_share"] = learned / total if total else 0.0
-            history.append(metrics)
-        return history
+                metrics["learned_opponent_share"] = learned / total if total else 0.0
+                history.append(metrics)
+            return history
 
 
 def write_followup_population(path: Path, league: DiversePolicyLeague) -> None:
