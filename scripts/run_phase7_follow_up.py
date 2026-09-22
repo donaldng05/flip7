@@ -80,23 +80,6 @@ def _condition_config(
     return config, FollowUpLeagueConfig(**population)
 
 
-def _participants(
-    checkpoint: Path,
-    snapshots: Sequence[Any],
-    observation: ObservationFamily,
-    *,
-    warmup: Any | None = None,
-    include_snapshots: bool = True,
-) -> tuple[TournamentParticipant, ...]:
-    return build_participants(
-        checkpoint,
-        observation,
-        snapshots=snapshots,
-        warmup=warmup,
-        include_snapshots=include_snapshots,
-    )
-
-
 def _rating_from_elo(elo: Mapping[str, object], name: str) -> float | None:
     for value in _list(elo["ratings"], "tournament ratings"):
         row = _mapping(value, "tournament rating")
@@ -285,7 +268,9 @@ def _run_training_condition(
         root, checkpoint, games, seed * 10_000, updates=updates
     )
     observation = ObservationFamily(config.observation)
-    participants = _participants(checkpoint, snapshots, observation, warmup=warmup)
+    participants = build_participants(
+        checkpoint, observation, snapshots, warmup, include_snapshots=True
+    )
     checkpoint_paths = {"final": checkpoint}
     checkpoint_paths.update(
         {snapshot.policy_id: snapshot.path for snapshot in snapshots}

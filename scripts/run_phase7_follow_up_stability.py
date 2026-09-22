@@ -79,23 +79,6 @@ def _league_config(
     return FollowUpLeagueConfig(**defaults)
 
 
-def _participants(
-    checkpoint: Path,
-    observation: ObservationFamily,
-    snapshots: Sequence[Any],
-    warmup: Any | None,
-    *,
-    include_snapshots: bool,
-) -> tuple[TournamentParticipant, ...]:
-    return build_participants(
-        checkpoint,
-        observation,
-        snapshots=snapshots,
-        warmup=warmup,
-        include_snapshots=include_snapshots,
-    )
-
-
 def _run_mappo(
     root: Mapping[str, object],
     output_root: Path,
@@ -322,7 +305,7 @@ def _run_condition(
         observation=ObservationFamily(observation_value),
     )
     tournament_values = _mapping(root["tournament"], "tournament")
-    participants = _participants(
+    participants = build_participants(
         checkpoint,
         ObservationFamily(observation_value),
         snapshots,
@@ -360,7 +343,7 @@ def _run_condition(
     full: Any | None = None
     full_schedule: tuple[Any, ...] = ()
     if run_full_tournament:
-        full_participants = _participants(
+        full_participants = build_participants(
             checkpoint,
             ObservationFamily(observation_value),
             snapshots,
