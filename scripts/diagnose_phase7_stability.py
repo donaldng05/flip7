@@ -8,7 +8,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from flip7.agents import PPOAgent
 from flip7.config.loader import load_config
 from flip7.envs import ObservationFamily
 from flip7.evaluation import (
@@ -26,6 +25,7 @@ from flip7.evaluation.diagnostics import (
     resolve_manifest_files,
     validate_seed_plan,
 )
+from flip7.experiment import as_mapping, cached_policy
 from flip7.training import baseline_factories
 
 CURRENT_REQUIRED_FILES = (
@@ -44,26 +44,12 @@ DEFAULT_REFERENCE_SUMMARY = Path("artifacts/phase6/summary.json")
 DEFAULT_OUTPUT = Path("artifacts/phase7-resolve/calibration-v2.json")
 
 
-def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    return cast(Mapping[str, object], value)
+_mapping = as_mapping
+_cached_policy = cached_policy
 
 
 def _read_mapping(path: Path, name: str) -> Mapping[str, object]:
     return _mapping(json.loads(path.read_text(encoding="utf-8")), name)
-
-
-def _cached_policy(path: Path) -> Any:
-    policy: PPOAgent | None = None
-
-    def factory() -> PPOAgent:
-        nonlocal policy
-        if policy is None:
-            policy = PPOAgent.from_checkpoint(path, deterministic=True)
-        return policy
-
-    return factory
 
 
 def _manifest_path(root: Path, condition: str | None, seed: int) -> Path:

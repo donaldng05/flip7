@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
 
 from flip7.config.loader import load_config
+from flip7.experiment import as_mapping
 from flip7.training import PPOConfig, PPOTrainer, write_history
 
-
-def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a mapping")
-    return cast(Mapping[str, object], value)
+_mapping = as_mapping
 
 
 def main() -> None:
