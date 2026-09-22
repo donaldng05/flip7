@@ -62,6 +62,38 @@ def test_evaluate_phase7_gates():
     assert result["tournament_adaptation"] is True
 
 
+def test_population_protection_uses_configured_degradation():
+    """phase7.yaml semantics: lower bound is latest + max_seed_degradation."""
+    gates = GateConfig.from_config(
+        {"gates": {"max_seed_degradation": -0.05, "min_heldout_difference": 0.03}}
+    )
+    result = evaluate_phase7_gates(
+        control_rotated={"win_share": 0.65, "seat_spread": 0.02},
+        league_rotated={"win_share": 0.62, "seat_spread": 0.04},
+        league_heldout={"win_share": 0.70},
+        latest_heldout={"win_share": 0.65},
+        league_warmup_delta_min=30.0,
+        league_aggregate={"final_rating_median": 1550.0},
+        reference_win_share=0.65,
+        reference_spread=0.02,
+        gates=gates,
+    )
+    assert result["population_protection"] is True
+
+    result = evaluate_phase7_gates(
+        control_rotated={"win_share": 0.65, "seat_spread": 0.02},
+        league_rotated={"win_share": 0.62, "seat_spread": 0.04},
+        league_heldout={"win_share": 0.60},
+        latest_heldout={"win_share": 0.65},
+        league_warmup_delta_min=30.0,
+        league_aggregate={"final_rating_median": 1550.0},
+        reference_win_share=0.65,
+        reference_spread=0.02,
+        gates=gates,
+    )
+    assert result["population_protection"] is False
+
+
 def test_is_candidate_robust():
     gates = GateConfig(min_baseline_win_share=0.60, max_seat_spread=0.05)
     row_pass = {"baseline": {"win_share": 0.65, "seat_spread": 0.03}}

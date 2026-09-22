@@ -80,9 +80,12 @@ def evaluate_phase7_gates(
             _as_float(league_rotated["win_share"]) >= gates.min_baseline_win_share
             and _as_float(league_rotated["seat_spread"]) <= gates.max_seat_spread
         ),
+        # Note: max_seed_degradation carries different semantics per phase.
+        # Here it is the aggregate held-out lower bound (phase7.yaml: -0.05);
+        # stability runners use it as the minimum paired per-seed difference.
         "population_protection": (
             _as_float(league_heldout["win_share"])
-            >= _as_float(latest_heldout["win_share"]) - 0.05
+            >= _as_float(latest_heldout["win_share"]) + gates.max_seed_degradation
             and _as_float(league_heldout["win_share"])
             >= _as_float(latest_heldout["win_share"]) + gates.min_heldout_difference
         ),
