@@ -818,6 +818,7 @@ def main() -> None:
         default=None,
     )
     parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--rollout-workers", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument(
@@ -849,6 +850,16 @@ def main() -> None:
     )
     if workers < 1 or focused_games < 1 or full_games < 1:
         raise ValueError("workers and tournament game counts must be positive")
+    rollout_workers = (
+        args.rollout_workers
+        if args.rollout_workers is not None
+        else int(_mapping(root["training"], "training")["rollout_workers"])
+        if "training" in root
+        and "rollout_workers" in _mapping(root["training"], "training")
+        else 1
+    )
+    if rollout_workers < 1:
+        raise ValueError("rollout_workers must be positive")
     if args.smoke:
         seeds = seeds[:1]
         updates = min(updates, 2)
@@ -856,9 +867,16 @@ def main() -> None:
         focused_games = 1
         full_games = 1
         workers = 1
-    training_override = (
-        {"reward": args.training_reward} if args.training_reward is not None else None
-    )
+        rollout_workers = 1
+    merged_training_override: dict[str, object] = {}
+    if args.training_reward is not None:
+        merged_training_override["reward"] = args.training_reward
+    if args.rollout_workers is not None or (
+        "training" in root
+        and "rollout_workers" in _mapping(root["training"], "training")
+    ):
+        merged_training_override["rollout_workers"] = rollout_workers
+    training_override = merged_training_override if merged_training_override else None
     if args.stage == "mappo":
         confirmation_path = output_root / "confirmation-summary.json"
         if not args.smoke and not confirmation_path.is_file():
