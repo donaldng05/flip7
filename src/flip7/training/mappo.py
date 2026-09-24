@@ -153,6 +153,20 @@ class MAPPOAgent:
         payload: dict[str, Any] = torch.load(
             path, map_location=device, weights_only=False
         )
+        return cls.from_payload(
+            payload, deterministic=deterministic, seed=seed, device=device
+        )
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        deterministic: bool = True,
+        seed: int | None = None,
+        device: str = "cpu",
+    ) -> MAPPOAgent:
+        """Build a policy from an already-loaded checkpoint payload."""
         config = cast(dict[str, Any], payload["config"])
         actor = SharedActor(
             config["observation_size"], config["action_size"], config["hidden_size"]

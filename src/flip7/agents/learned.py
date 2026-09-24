@@ -174,6 +174,20 @@ class PPOAgent:
         payload: dict[str, Any] = torch.load(
             path, map_location=device, weights_only=False
         )
+        return cls.from_payload(
+            payload, deterministic=deterministic, seed=seed, device=device
+        )
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        deterministic: bool = True,
+        seed: int | None = None,
+        device: str = "cpu",
+    ) -> PPOAgent:
+        """Build a policy from an already-loaded checkpoint payload."""
         config = payload["config"]
         network_name = config.get("network", "shared")
         if network_name == "separate":
