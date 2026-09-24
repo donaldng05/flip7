@@ -27,6 +27,7 @@ from flip7.training.ppo import (
     PPOConfig,
     PPOTrainer,
     Rollout,
+    RolloutChunkResult,
     RolloutChunkTask,
     collect_rollout_chunk_in_worker,
     write_history,
@@ -231,6 +232,7 @@ class SeatBalancedPPOTrainer(PPOTrainer):
             segment_bootstraps[end_idx] = r.next_value
             offset += chunk_len
 
+        self._merge_worker_exposure(results)
         self.last_rollout_seat_counts = quotas
         self.last_rollout_reset_seeds = tuple(all_reset_seeds)
         self.rollout_schedule.append(
@@ -391,6 +393,11 @@ class StabilityLeaguePPOTrainer(SeatBalancedPPOTrainer):
             opponent_provider=self.league.episode_lineup,
             seat_opponent_provider=self.league.episode_lineup_for_seat,
         )
+
+    def _merge_worker_exposure(self, results: list[RolloutChunkResult]) -> None:
+        """Fold worker-side opponent exposure into the main-process league."""
+        for result in results:
+            self.league.merge_exposure(result.exposure)
 
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
         """Train and archive snapshots using the fixed final update contract."""

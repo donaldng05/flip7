@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -24,7 +24,12 @@ from flip7.evaluation.diversity import (
     policy_behavior,
 )
 from flip7.training.league import PolicySnapshot, baseline_factories
-from flip7.training.ppo import EpisodeLineup, PPOConfig, PPOTrainer
+from flip7.training.ppo import (
+    EpisodeLineup,
+    PPOConfig,
+    PPOTrainer,
+    RolloutChunkResult,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +158,20 @@ class DiversePolicyLeague:
     @property
     def exposure(self) -> Mapping[str, int]:
         return dict(self._exposure)
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Drop the live policy cache when pickling for rollout workers.
+
+        Cached PPOAgent instances hold torch generators that must not cross
+        process boundaries; workers reload policies from checkpoint paths.
+        """
+        state = self.__dict__.copy()
+        state["_policy_cache"] = {}
+        return state
+
+    def merge_exposure(self, counts: Mapping[str, int]) -> None:
+        """Fold opponent-selection counts sampled in a worker process."""
+        self._exposure.update(counts)
 
     @property
     def response_signatures(self) -> Mapping[str, tuple[float, ...]]:
@@ -483,6 +502,11 @@ class DiverseLeaguePPOTrainer(PPOTrainer):
             opponent_names=selected.baseline_names,
             opponent_provider=self.league.episode_lineup,
         )
+
+    def _merge_worker_exposure(self, results: list[RolloutChunkResult]) -> None:
+        """Fold worker-side opponent exposure into the main-process league."""
+        for result in results:
+            self.league.merge_exposure(result.exposure)
 
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
         if checkpoint is None:

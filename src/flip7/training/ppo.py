@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import random
+from collections import Counter
 from collections.abc import Callable, Generator, Mapping
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -242,6 +243,15 @@ class RolloutChunkResult:
     next_value: float
     seat_ids: NDArray[np.int64]
     reset_seeds: tuple[int, ...]
+    exposure: dict[str, int] = field(default_factory=dict[str, int])
+
+
+def _provider_exposure(provider: Any) -> dict[str, int] | None:
+    """Snapshot tracked exposure from a worker-side provider copy, if any."""
+    owner = getattr(provider, "__self__", None)
+    if owner is None or not hasattr(owner, "exposure"):
+        return None
+    return dict(owner.exposure)
 
 
 def collect_rollout_chunk_in_worker(
@@ -316,6 +326,12 @@ def collect_rollout_chunk_in_worker(
             return network(obs, context)
         return network(obs)
 
+    # The provider is a worker-side copy of the main-process league, so it
+    # arrives with the main process's exposure counts already baked in.
+    # Snapshot a baseline now; only this chunk's delta ships back for merging.
+    # Non-tracking providers (baselines) expose nothing and yield no delta.
+    baseline_exposure = _provider_exposure(task.opponent_provider) or {}
+
     env = _create_env(task.requested_learner_id)
     reset_seed = worker_rng.randrange(2**31)
     reset_seeds.append(reset_seed)
@@ -366,6 +382,13 @@ def collect_rollout_chunk_in_worker(
             )
     env.close()
 
+    current_exposure = _provider_exposure(task.opponent_provider)
+    chunk_exposure: dict[str, int] = (
+        dict(Counter(current_exposure) - Counter(baseline_exposure))
+        if current_exposure is not None
+        else {}
+    )
+
     return RolloutChunkResult(
         chunk_index=task.chunk_index,
         observations=np.asarray(observations, dtype=np.float32),
@@ -378,6 +401,7 @@ def collect_rollout_chunk_in_worker(
         next_value=next_value,
         seat_ids=np.asarray(seat_ids, dtype=np.int64),
         reset_seeds=tuple(reset_seeds),
+        exposure=chunk_exposure,
     )
 
 
@@ -625,6 +649,7 @@ class PPOTrainer:
             segment_ends[end_idx] = True
             segment_bootstraps[end_idx] = r.next_value
             offset += chunk_len
+        self._merge_worker_exposure(results)
 
         return Rollout(
             np.concatenate([r.observations for r in results], axis=0),
@@ -639,6 +664,12 @@ class PPOTrainer:
             segment_ends,
             segment_bootstraps,
         )
+
+    def _merge_worker_exposure(self, results: list[RolloutChunkResult]) -> None:
+        """Fold worker-side opponent exposure into the main-process league.
+
+        No-op unless overridden: only league trainers track opponent exposure.
+        """
 
     def collect_rollout(self) -> Rollout:
         if self.config.rollout_workers > 1:
