@@ -10,6 +10,7 @@ import pytest
 from flip7.training.ppo import (
     PPOConfig,
     PPOTrainer,
+    Rollout,
     balanced_quotas,
     compute_gae,
 )
@@ -171,6 +172,133 @@ def test_seat_balanced_parallel_rollout(workers: int) -> None:
 
     metrics = trainer.update(rollout)
     assert np.isfinite(metrics["policy_loss"])
+
+
+def _assert_rollouts_equal(first: object, second: object) -> None:
+    """Assert two Rollout objects are bit-identical across reruns."""
+    assert isinstance(first, Rollout)
+    assert isinstance(second, Rollout)
+    np.testing.assert_array_equal(first.observations, second.observations)
+    np.testing.assert_array_equal(first.masks, second.masks)
+    np.testing.assert_array_equal(first.actions, second.actions)
+    np.testing.assert_array_equal(first.old_log_probs, second.old_log_probs)
+    np.testing.assert_array_equal(first.rewards, second.rewards)
+    np.testing.assert_array_equal(first.dones, second.dones)
+    np.testing.assert_array_equal(first.values, second.values)
+    assert first.next_value == second.next_value
+    assert first.seat_ids is not None and second.seat_ids is not None
+    np.testing.assert_array_equal(first.seat_ids, second.seat_ids)
+    assert first.segment_ends is not None and second.segment_ends is not None
+    np.testing.assert_array_equal(first.segment_ends, second.segment_ends)
+    assert (
+        first.segment_next_values is not None and second.segment_next_values is not None
+    )
+    np.testing.assert_array_equal(first.segment_next_values, second.segment_next_values)
+
+
+def test_parallel_rollout_rerun_determinism() -> None:
+    """Same seed + same worker count must reproduce bit-identical rollouts."""
+    first = PPOTrainer(PPOConfig(seed=2024, rollout_steps=64, rollout_workers=4))
+    second = PPOTrainer(PPOConfig(seed=2024, rollout_steps=64, rollout_workers=4))
+    _assert_rollouts_equal(first.collect_rollout(), second.collect_rollout())
+
+
+def test_seat_balanced_parallel_rerun_determinism() -> None:
+    """Seat-balanced parallel rollouts must also reproduce bit-identically."""
+    provider = BalancedBaselineProvider(("random", "risk"))
+
+    def _make_trainer() -> SeatBalancedPPOTrainer:
+        return SeatBalancedPPOTrainer(
+            PPOConfig(seed=31337, rollout_steps=60, rollout_workers=4),
+            opponent_provider=lambda rng, count: provider.episode_lineup(rng, count),
+            seat_opponent_provider=provider.episode_lineup_for_seat,
+        )
+
+    _assert_rollouts_equal(
+        _make_trainer().collect_rollout(), _make_trainer().collect_rollout()
+    )
+
+
+def test_gae_chunk_boundaries_prevent_cross_chunk_leakage() -> None:
+    """Segmented GAE must equal per-chunk GAE concatenated (no leakage)."""
+    rewards = np.array(
+        [
+            0.1,
+            -0.2,
+            0.3,
+            0.0,
+            0.5,
+            -0.1,
+            0.2,
+            0.4,
+            -0.3,
+            0.0,
+            0.1,
+            0.6,
+            0.2,
+            -0.4,
+            0.3,
+            0.1,
+        ],
+        dtype=np.float32,
+    )
+    dones = np.zeros(16, dtype=np.bool_)
+    values = np.array(
+        [
+            0.5,
+            0.4,
+            0.6,
+            0.3,
+            0.2,
+            0.7,
+            0.1,
+            0.5,
+            0.4,
+            0.3,
+            0.2,
+            0.6,
+            0.5,
+            0.4,
+            0.3,
+            0.2,
+        ],
+        dtype=np.float32,
+    )
+    bootstraps = [1.0, -0.5, 0.25, 0.0]
+    segment_ends = np.zeros(16, dtype=np.bool_)
+    segment_next_values = np.zeros(16, dtype=np.float32)
+    for chunk in range(4):
+        end = chunk * 4 + 3
+        segment_ends[end] = True
+        segment_next_values[end] = np.float32(bootstraps[chunk])
+
+    joint_advantages, joint_returns = compute_gae(
+        rewards,
+        dones,
+        values,
+        bootstraps[-1],
+        0.99,
+        0.95,
+        segment_ends=segment_ends,
+        segment_next_values=segment_next_values,
+    )
+    chunk_advantages: list[np.ndarray] = []
+    chunk_returns: list[np.ndarray] = []
+    for chunk in range(4):
+        sl = slice(chunk * 4, chunk * 4 + 4)
+        adv, ret = compute_gae(
+            rewards[sl], dones[sl], values[sl], bootstraps[chunk], 0.99, 0.95
+        )
+        chunk_advantages.append(adv)
+        chunk_returns.append(ret)
+    np.testing.assert_array_equal(joint_advantages, np.concatenate(chunk_advantages))
+    np.testing.assert_array_equal(joint_returns, np.concatenate(chunk_returns))
+
+    # Sensitivity check: without boundaries the result must differ.
+    unsegmented_advantages, _ = compute_gae(
+        rewards, dones, values, bootstraps[-1], 0.99, 0.95
+    )
+    assert not np.allclose(unsegmented_advantages, joint_advantages)
 
 
 def test_persistent_worker_pool_lifecycle(tmp_path: Path) -> None:
