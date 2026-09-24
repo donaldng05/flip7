@@ -148,7 +148,12 @@ def run_paired_rotated_evaluation(
     workers: int = 1,
     checkpoint_paths: (Mapping[str, Path | str] | Sequence[Path | str] | None) = None,
 ) -> PairedEvaluation:
-    """Compare two policies on identical rotated games and seed blocks."""
+    """Compare two policies on identical rotated games and seed blocks.
+
+    When workers > 1, baseline names resolve to default factories and the
+    compared policies load from checkpoint_paths; in-memory factories are
+    ignored in that case.
+    """
     if games < 1:
         raise ValueError("games must be positive")
     if workers < 1:

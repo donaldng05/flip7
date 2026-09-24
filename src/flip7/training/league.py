@@ -25,6 +25,7 @@ from flip7.training.ppo import (
     EpisodeLineup,
     PPOConfig,
     PPOTrainer,
+    RolloutChunkResult,
     baseline_factories,
 )
 
@@ -113,6 +114,10 @@ class PolicyLeague:
     def exposure(self) -> Mapping[str, int]:
         """Return cumulative opponent-selection counts."""
         return dict(self._exposure)
+
+    def merge_exposure(self, counts: Mapping[str, int]) -> None:
+        """Fold opponent-selection counts sampled in a worker process."""
+        self._exposure.update(counts)
 
     def episode_lineup(self, rng: random.Random, player_count: int) -> EpisodeLineup:
         """Build one seeded lineup with a uniformly sampled learner seat."""
@@ -282,6 +287,11 @@ class LeaguePPOTrainer(PPOTrainer):
             opponent_names=selected_config.baseline_names,
             opponent_provider=self.league.episode_lineup,
         )
+
+    def _merge_worker_exposure(self, results: list[RolloutChunkResult]) -> None:
+        """Fold worker-side opponent exposure into the main-process league."""
+        for result in results:
+            self.league.merge_exposure(result.exposure)
 
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
         """Train and periodically archive frozen snapshots for later episodes."""

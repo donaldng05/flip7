@@ -1,7 +1,10 @@
 """Unit tests for flip7.experiment.eval."""
 
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import cast
+
+import pytest
 
 from flip7.agents import RandomLegalAgent
 from flip7.envs import ObservationFamily
@@ -61,3 +64,41 @@ def test_run_standard_evaluations_is_deterministic(tmp_path: Path) -> None:
         policy_factory=lambda: RandomLegalAgent(seed=11),
     )
     assert first["summary"] == second["summary"]
+
+
+def _root_with_workers(workers: int) -> dict[str, object]:
+    root = _root()
+    evaluation = cast(dict[str, object], root["evaluation"])
+    evaluation["workers"] = workers
+    return root
+
+
+def test_explicit_workers_overrides_config(tmp_path: Path) -> None:
+    """Explicit workers=1 stays serial even when config requests parallel."""
+    baseline, _ = run_standard_evaluations(
+        _root_with_workers(4),
+        tmp_path / "missing.pt",
+        games=1,
+        seed_offset=0,
+        observation=ObservationFamily.BASIC,
+        policy_factory=lambda: RandomLegalAgent(seed=11),
+        workers=1,
+    )
+    assert cast(dict[str, object], baseline["summary"])["games"] == 9
+
+
+def test_default_workers_reads_config(tmp_path: Path) -> None:
+    """Omitted workers falls back to evaluation.workers (here: parallel).
+
+    The parallel path loads the checkpoint in worker initializers, so a
+    missing file kills the pool instead of running serially.
+    """
+    with pytest.raises(BrokenProcessPool):
+        run_standard_evaluations(
+            _root_with_workers(2),
+            tmp_path / "missing.pt",
+            games=1,
+            seed_offset=0,
+            observation=ObservationFamily.BASIC,
+            policy_factory=lambda: RandomLegalAgent(seed=11),
+        )

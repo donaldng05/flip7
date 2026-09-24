@@ -98,7 +98,7 @@ post-dedup. Same optimizer, matchups, and seed bases as
 
 ```powershell
 uv run python scripts/run_phase6.py `
-  --config artifacts/guardrail/guardrail.yaml `
+  --config configs/guardrail.yaml `
   --output-root artifacts/guardrail/run1
 ```
 
@@ -116,7 +116,42 @@ band (~8.5-13.5pp); final scores and bust rates match the 50-update
 50-update 65.4% pooled result at 1/5 the training budget with wide
 CIs (60 games per seat-block), as expected.
 
-Regression rule: future fast-loop work must reproduce these per-seed
-numbers within CI overlap. Investigate if either seed's win share
-falls outside its frozen CI or spread grows by more than 5pp. Never
-gate on pooled spread alone (see `phase-7-resolution.md`).
+## Guardrail regression rule (two-sample)
+
+Parallel training legitimately uses different RNG streams than serial
+training, so point-in-frozen-CI is the wrong test (it false-alarms on
+ordinary sampling noise). Gate recertification runs as follows, per seed:
+
+- Win share: the new per-seed 95% CI must **overlap** the frozen
+  per-seed 95% CI above.
+- Spread: growth versus frozen must be **at most 5pp**. This is a
+  tripwire, not a precise gate: with 60 games per seat-block the
+  spread estimator itself is noisy.
+- Identity: serial reruns must match frozen **bit-identically**,
+  Phase-A-only runs must match their serial twin bit-identically, and
+  full-parallel reruns must match bit-identically (full condition-dict
+  equality, not just rounded table values).
+
+Never gate on pooled spread alone (see `phase-7-resolution.md`). If any
+check fails, stop and file an issue; do not tune around it.
+
+## Recertification after parallel fixes (2026-09-24, CPU/Windows)
+
+Serial rerun, Phase-A-only (`--workers 4`), full parallel
+(`--workers 4 --rollout-workers 4`), and a full-parallel rerun:
+
+| Run | Wall | Seed 7 win [CI] | Seed 7 spread | Seed 17 win [CI] | Seed 17 spread |
+| --- | ---: | --- | ---: | --- | ---: |
+| Frozen | 52.6s | 57.5% [50.3, 64.7] | 6.7pp | 69.7% [63.0, 76.4] | 10.8pp |
+| Serial | 61.8s | exact match | exact match | exact match | exact match |
+| Phase-A-only | 52.2s | exact match | exact match | exact match | exact match |
+| Full parallel | 33.9s | 55.6% [48.3, 62.8] | 11.7pp | 65.3% [58.3, 72.2] | 14.2pp |
+| Full rerun | 33.9s | exact match | exact match | exact match | exact match |
+
+Verdict: **pass**. Serial == frozen, Phase-A-only == serial, and
+rerun == full all hold as full bit-identical condition-dict equality.
+Full-parallel win-share CIs overlap frozen on both seeds
+([50.3, 62.8] and [63.0, 72.2]); spread grew +5.0pp on seed 7 (exactly
+at the tripwire, consistent with estimator noise at n=60/seat) and
++3.4pp on seed 17. Pooled win share moved 63.6% to 60.4%, within noise.
+Full parallel runs 1.8x faster than serial at guardrail budget.
