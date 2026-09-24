@@ -46,11 +46,17 @@ from flip7.training import (
 
 
 def _config_for_condition(
-    root: Mapping[str, object], condition: Mapping[str, object], seed: int
+    root: Mapping[str, object],
+    condition: Mapping[str, object],
+    seed: int,
+    *,
+    rollout_workers: int = 1,
 ) -> PPOConfig:
     if "trainer" not in condition:
         raise ValueError("condition is missing trainer")
-    return training_config(root, seed)
+    return training_config(
+        root, seed, training_override={"rollout_workers": rollout_workers}
+    )
 
 
 def _league_config(
@@ -125,6 +131,9 @@ def _run_seed(
     condition: Mapping[str, object],
     seed: int,
     output_root: Path,
+    *,
+    workers: int = 1,
+    rollout_workers: int = 1,
 ) -> dict[str, object]:
     condition_name = str(condition["name"])
     run_dir = output_root / condition_name / f"seed-{seed}"
@@ -135,7 +144,9 @@ def _run_seed(
     tournament_path = run_dir / "tournament.json"
     manifest_path = run_dir / "manifest.json"
 
-    config = _config_for_condition(root, condition, seed)
+    config = _config_for_condition(
+        root, condition, seed, rollout_workers=rollout_workers
+    )
     trainer_name = str(condition["trainer"])
     if trainer_name == "ppo":
         trainer: PPOTrainer | LeaguePPOTrainer = PPOTrainer(
@@ -195,6 +206,8 @@ def _run_seed(
         seed_bases=seed_bases,
         observation=observation,
         matchups=matchups,
+        workers=workers,
+        checkpoint_path=checkpoint,
     )
     heldout_roster = baseline_roster | heldout_factories()
     heldout_results = run_rotated_matchups(
@@ -204,6 +217,8 @@ def _run_seed(
         seed_bases=heldout_seed_values,
         observation=observation,
         matchups=heldout_matchups,
+        workers=workers,
+        checkpoint_path=checkpoint,
     )
 
     tournament_values = as_mapping(root["tournament"], "tournament")
@@ -289,8 +304,21 @@ def _run_condition(
     condition: Mapping[str, object],
     seeds: Sequence[int],
     output_root: Path,
+    *,
+    workers: int = 1,
+    rollout_workers: int = 1,
 ) -> dict[str, object]:
-    seed_summaries = [_run_seed(root, condition, seed, output_root) for seed in seeds]
+    seed_summaries = [
+        _run_seed(
+            root,
+            condition,
+            seed,
+            output_root,
+            workers=workers,
+            rollout_workers=rollout_workers,
+        )
+        for seed in seeds
+    ]
     return _aggregate_condition(condition, seeds, seed_summaries)
 
 
@@ -339,9 +367,29 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/phase7.yaml"))
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/phase7"))
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes for evaluation (default: 1)",
+    )
+    parser.add_argument(
+        "--rollout-workers",
+        type=int,
+        default=None,
+        help="Number of worker processes for PPO rollout collection",
+    )
     args = parser.parse_args()
 
     root = as_mapping(load_config(args.config), "configuration")
+    train_cfg = as_mapping(root.get("training", {}), "training")
+    rollout_workers = (
+        args.rollout_workers
+        if args.rollout_workers is not None
+        else int(cast(int | str, train_cfg.get("rollout_workers", 1)))
+    )
+    if rollout_workers < 1:
+        raise ValueError("rollout_workers must be positive")
     seeds = as_ints(root["seeds"], "seeds")
     conditions = as_list(root["conditions"], "conditions")
     condition_results: dict[str, object] = {}
@@ -350,7 +398,12 @@ def main() -> None:
         if "name" not in condition:
             raise ValueError(f"conditions[{index}] is missing name")
         condition_results[str(condition["name"])] = _run_condition(
-            root, condition, seeds, args.output_root
+            root,
+            condition,
+            seeds,
+            args.output_root,
+            workers=args.workers,
+            rollout_workers=rollout_workers,
         )
 
     reference = as_mapping(root["phase6_reference"], "phase6_reference")

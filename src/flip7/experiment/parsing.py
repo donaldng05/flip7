@@ -110,6 +110,7 @@ def training_config(
         entropy_coefficient_end=_opt_float(training.get("entropy_coefficient_end")),
         target_kl=_opt_float(training.get("target_kl")),
         value_clip_epsilon=_opt_float(training.get("value_clip_epsilon")),
+        rollout_workers=int(cast(int | str, training.get("rollout_workers", 1))),
     )
 
 

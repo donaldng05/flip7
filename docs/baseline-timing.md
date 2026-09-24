@@ -88,3 +88,70 @@ Re-run the smoke command above on `phase-7-resolve` at the recorded
 commit. Expect ~1 min wall-clock and 5 conditions in
 `screening-summary.json`. Do not compare smoke win shares across
 machines; only wall-clock and run completion are frozen here.
+
+## Fast-loop guardrail (frozen reference)
+
+Seat-robustness regression signal for cleanup/speed work, on `main`
+post-dedup. Same optimizer, matchups, and seed bases as
+`configs/phase6.yaml`; reduced to `basic_random` x seeds `[7, 17]` x
+10 updates x 20 games/seat (360 games).
+
+```powershell
+uv run python scripts/run_phase6.py `
+  --config configs/guardrail.yaml `
+  --output-root artifacts/guardrail/run1
+```
+
+Frozen result (`WALL_SECONDS=52.6`, 2026-09-22, CPU/Windows):
+
+| Seed | Win share | 95% CI | Spread | Seat 0/1/2 | Final | Bust |
+| ---: | ---: | --- | ---: | --- | ---: | ---: |
+| 7 | 57.5% | [50.3, 64.7] | 6.7pp | 53.3/59.2/60.0% | 198.4 | 15.9% |
+| 17 | 69.7% | [63.0, 76.4] | 10.8pp | 63.3/74.2/71.7% | 201.2 | 13.8% |
+| pooled | 63.6% | — | 8.3pp | — | — | — |
+
+Sanity: per-seed spreads sit inside the historical Phase 6 per-seed
+band (~8.5-13.5pp); final scores and bust rates match the 50-update
+`basic_random` profile (~200 final, ~14% bust). Win shares bracket the
+50-update 65.4% pooled result at 1/5 the training budget with wide
+CIs (60 games per seat-block), as expected.
+
+## Guardrail regression rule (two-sample)
+
+Parallel training legitimately uses different RNG streams than serial
+training, so point-in-frozen-CI is the wrong test (it false-alarms on
+ordinary sampling noise). Gate recertification runs as follows, per seed:
+
+- Win share: the new per-seed 95% CI must **overlap** the frozen
+  per-seed 95% CI above.
+- Spread: growth versus frozen must be **at most 5pp**. This is a
+  tripwire, not a precise gate: with 60 games per seat-block the
+  spread estimator itself is noisy.
+- Identity: serial reruns must match frozen **bit-identically**,
+  Phase-A-only runs must match their serial twin bit-identically, and
+  full-parallel reruns must match bit-identically (full condition-dict
+  equality, not just rounded table values).
+
+Never gate on pooled spread alone (see `phase-7-resolution.md`). If any
+check fails, stop and file an issue; do not tune around it.
+
+## Recertification after parallel fixes (2026-09-24, CPU/Windows)
+
+Serial rerun, Phase-A-only (`--workers 4`), full parallel
+(`--workers 4 --rollout-workers 4`), and a full-parallel rerun:
+
+| Run | Wall | Seed 7 win [CI] | Seed 7 spread | Seed 17 win [CI] | Seed 17 spread |
+| --- | ---: | --- | ---: | --- | ---: |
+| Frozen | 52.6s | 57.5% [50.3, 64.7] | 6.7pp | 69.7% [63.0, 76.4] | 10.8pp |
+| Serial | 61.8s | exact match | exact match | exact match | exact match |
+| Phase-A-only | 52.2s | exact match | exact match | exact match | exact match |
+| Full parallel | 33.9s | 55.6% [48.3, 62.8] | 11.7pp | 65.3% [58.3, 72.2] | 14.2pp |
+| Full rerun | 33.9s | exact match | exact match | exact match | exact match |
+
+Verdict: **pass**. Serial == frozen, Phase-A-only == serial, and
+rerun == full all hold as full bit-identical condition-dict equality.
+Full-parallel win-share CIs overlap frozen on both seeds
+([50.3, 62.8] and [63.0, 72.2]); spread grew +5.0pp on seed 7 (exactly
+at the tripwire, consistent with estimator noise at n=60/seat) and
++3.4pp on seed 17. Pooled win share moved 63.6% to 60.4%, within noise.
+Full parallel runs 1.8x faster than serial at guardrail budget.

@@ -201,6 +201,7 @@ def _run_evaluation(
     *,
     updates: int,
     agent_factory: Any | None = None,
+    workers: int = 1,
 ) -> tuple[dict[str, object], dict[str, object]]:
     observation = ObservationFamily(str(_mapping(root["env"], "env")["observation"]))
     return run_standard_evaluations(
@@ -210,6 +211,7 @@ def _run_evaluation(
         seed_offset=seed_offset,
         observation=observation,
         policy_factory=agent_factory,
+        workers=workers,
     )
 
 
@@ -223,6 +225,7 @@ def _run_training_condition(
     games: int,
     tournament_games: int,
     tournament_workers: int,
+    workers: int = 1,
 ) -> dict[str, object]:
     name = str(condition["name"])
     run_dir = output_root / name / f"seed-{seed}"
@@ -265,7 +268,7 @@ def _run_training_condition(
             },
         )
     baseline, heldout = _run_evaluation(
-        root, checkpoint, games, seed * 10_000, updates=updates
+        root, checkpoint, games, seed * 10_000, updates=updates, workers=workers
     )
     observation = ObservationFamily(config.observation)
     participants = build_participants(
@@ -485,6 +488,7 @@ def _run_mappo(
     updates: int,
     games: int,
     seeds: Sequence[int],
+    workers: int = 1,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for seed in seeds:
@@ -508,6 +512,7 @@ def _run_mappo(
             agent_factory=lambda path: MAPPOAgent.from_checkpoint(
                 path, deterministic=True
             ),
+            workers=workers,
         )
         observation = ObservationFamily(
             str(_mapping(root["env"], "env")["observation"])
@@ -623,6 +628,12 @@ def main() -> None:
         "--output-root", type=Path, default=Path("artifacts/phase7-follow-up")
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="parallel CPU workers for evaluation matchups (default: 1)",
+    )
+    parser.add_argument(
         "--tournament-workers",
         type=int,
         default=None,
@@ -669,7 +680,12 @@ def main() -> None:
         raise ValueError("MAPPO requires a completed follow-up confirmation summary")
     if args.stage == "mappo":
         rows = _run_mappo(
-            root, args.output_root, updates=updates, games=games, seeds=seeds
+            root,
+            args.output_root,
+            updates=updates,
+            games=games,
+            seeds=seeds,
+            workers=args.workers,
         )
         _write_stage_summary(
             args.output_root,
@@ -716,6 +732,7 @@ def main() -> None:
                     games=games,
                     tournament_games=tournament_games,
                     tournament_workers=tournament_workers,
+                    workers=args.workers,
                 )
             )
     _write_stage_summary(

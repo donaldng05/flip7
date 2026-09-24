@@ -107,6 +107,7 @@ def _run_mappo(
             policy_factory=lambda path=checkpoint: MAPPOAgent.from_checkpoint(
                 path, deterministic=True
             ),
+            workers=workers,
         )
         participants = tuple(
             [
@@ -303,6 +304,7 @@ def _run_condition(
         games=games,
         seed_offset=seed * 10_000,
         observation=ObservationFamily(observation_value),
+        workers=workers,
     )
     tournament_values = _mapping(root["tournament"], "tournament")
     participants = build_participants(
@@ -534,6 +536,7 @@ def _paired_heldout_comparisons(
     rows: Sequence[Mapping[str, object]],
     *,
     games: int,
+    workers: int = 1,
 ) -> list[dict[str, object]]:
     """Run common-seed held-out comparisons for the diversity gate."""
     latest = {
@@ -576,6 +579,8 @@ def _paired_heldout_comparisons(
             matchups=matchups,
             first_name="response_diverse",
             second_name="latest_only",
+            workers=workers,
+            checkpoint_paths=(diverse_path, latest_path),
         )
         comparisons.append({"seed": seed, **paired.as_dict()})
     _write_json(
@@ -811,6 +816,7 @@ def main() -> None:
         default=None,
     )
     parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--rollout-workers", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument(
@@ -842,6 +848,16 @@ def main() -> None:
     )
     if workers < 1 or focused_games < 1 or full_games < 1:
         raise ValueError("workers and tournament game counts must be positive")
+    rollout_workers = (
+        args.rollout_workers
+        if args.rollout_workers is not None
+        else int(_mapping(root["training"], "training")["rollout_workers"])
+        if "training" in root
+        and "rollout_workers" in _mapping(root["training"], "training")
+        else 1
+    )
+    if rollout_workers < 1:
+        raise ValueError("rollout_workers must be positive")
     if args.smoke:
         seeds = seeds[:1]
         updates = min(updates, 2)
@@ -849,9 +865,16 @@ def main() -> None:
         focused_games = 1
         full_games = 1
         workers = 1
-    training_override = (
-        {"reward": args.training_reward} if args.training_reward is not None else None
-    )
+        rollout_workers = 1
+    merged_training_override: dict[str, object] = {}
+    if args.training_reward is not None:
+        merged_training_override["reward"] = args.training_reward
+    if args.rollout_workers is not None or (
+        "training" in root
+        and "rollout_workers" in _mapping(root["training"], "training")
+    ):
+        merged_training_override["rollout_workers"] = rollout_workers
+    training_override = merged_training_override if merged_training_override else None
     if args.stage == "mappo":
         confirmation_path = output_root / "confirmation-summary.json"
         if not args.smoke and not confirmation_path.is_file():
@@ -1077,7 +1100,7 @@ def main() -> None:
             {"required": False, "condition": None},
         )
     paired = _paired_heldout_comparisons(
-        root, output_root / args.stage, rows, games=games
+        root, output_root / args.stage, rows, games=games, workers=workers
     )
     aggregate = _aggregate(root, rows, paired)
     _write_json(

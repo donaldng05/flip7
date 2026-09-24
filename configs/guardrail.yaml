@@ -1,0 +1,44 @@
+# Fast-loop guardrail: seat-robustness regression signal for cleanup/speed work.
+# Same optimizer, matchups, and seed bases as configs/phase6.yaml; reduced to
+# basic_random x 2 seeds x 10 updates x 20 games/seat. Frozen reference and
+# regression rule live in docs/baseline-timing.md. Do not retune budgets here;
+# any change invalidates the frozen numbers.
+experiment: phase6-guardrail
+players: 3
+seeds: [7, 17]
+env:
+  reward: sparse_win
+  learner_id: 0
+training:
+  algorithm: ppo
+  device: cpu
+  hidden_size: 128
+  rollout_steps: 1024
+  updates: 10
+  epochs: 4
+  minibatch_size: 64
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coefficient: 0.5
+  entropy_coefficient: 0.01
+  max_grad_norm: 0.5
+opponents:
+  training: [random, threshold, risk, ev, dp]
+conditions:
+  - name: basic_random
+    observation: basic
+    learner_seat_mode: random
+evaluation:
+  games_per_seat: 20
+  seed_bases: [10000, 11000, 12000]
+  matchups:
+    - [random, threshold]
+    - [risk, ev]
+    - [dp, threshold]
+phase5_reference:
+  pooled_win_share: 0.337
+  seat_spread: 0.404
+  minimum_improvement: 0.05
+  maximum_spread_ratio: 0.75

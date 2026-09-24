@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -14,7 +15,7 @@ from torch.distributions import Categorical
 
 from flip7.agents import Agent, PPOAgent
 from flip7.agents.learned import masked_logits
-from flip7.envs import Flip7VsOpponentsEnv, ObservationFamily, agent_name
+from flip7.envs import ObservationFamily, agent_name
 from flip7.training.league import baseline_factories
 from flip7.training.league_followup import (
     DiversePolicyLeague,
@@ -26,10 +27,37 @@ from flip7.training.ppo import (
     PPOConfig,
     PPOTrainer,
     Rollout,
+    RolloutChunkResult,
+    RolloutChunkTask,
+    collect_rollout_chunk_in_worker,
     write_history,
 )
 
 type SeatLineupProvider = Callable[[random.Random, int, int], EpisodeLineup]
+
+
+def partition_seat_tasks(
+    quotas: Sequence[int], num_tasks: int
+) -> list[tuple[int, int]]:
+    """Partition seat quotas into (seat_id, steps) chunks across workers.
+
+    Guarantees:
+    - Sum of steps for each seat equals quotas[seat].
+    - Produces at least max(len(quotas), num_tasks) chunks so all workers are utilized.
+    """
+    if not quotas:
+        raise ValueError("quotas must not be empty")
+    k = len(quotas)
+    sub_counts = [1] * k
+    while sum(sub_counts) < num_tasks:
+        largest_seat = max(range(k), key=lambda s: quotas[s] / sub_counts[s])
+        sub_counts[largest_seat] += 1
+    tasks: list[tuple[int, int]] = []
+    for s, q in enumerate(quotas):
+        base, rem = divmod(q, sub_counts[s])
+        for i in range(sub_counts[s]):
+            tasks.append((s, base + int(i < rem)))
+    return tasks
 
 
 def training_response_signature(
@@ -41,6 +69,9 @@ def training_response_signature(
     seed: int,
 ) -> tuple[float, ...]:
     """Measure a checkpoint against training-only baseline matchups.
+
+    Always serial by design: a handful of games can never amortize the cost
+    of spawning a worker pool, and this runs once per archived snapshot.
 
     The imports are local so the evaluation package can continue importing the
     training package without creating an import cycle.
@@ -152,8 +183,88 @@ class SeatBalancedPPOTrainer(PPOTrainer):
             seat_opponent_provider=seat_opponent_provider,
         )
 
+    def _parallel_provider(self) -> Any:
+        """Return the seat provider shipped to parallel rollout workers."""
+        return self._seat_opponent_provider
+
+    def _collect_rollout_parallel(self) -> Rollout:
+        quotas = balanced_seat_quotas(
+            self.config.rollout_steps, self.config.player_count
+        )
+        seat_tasks = partition_seat_tasks(quotas, self.config.rollout_workers)
+        weights = {k: v.detach().cpu() for k, v in self.network.state_dict().items()}
+        tasks = [
+            RolloutChunkTask(
+                chunk_index=index,
+                seed=self._rng.randrange(2**31),
+                steps=chunk_steps,
+                player_count=self.config.player_count,
+                requested_learner_id=seat_id,
+                observation_family=self.config.observation,
+                reward_mode=self.config.reward,
+                gamma=self.config.gamma,
+                weights=weights,
+                network_type=self.config.network,
+                observation_size=self.observation_size,
+                action_size=self.action_size,
+                hidden_size=self.config.hidden_size,
+                critic_seat_conditioned=self.config.critic_seat_conditioned,
+                opponent_provider=self._seat_opponent_provider,
+            )
+            for index, (seat_id, chunk_steps) in enumerate(seat_tasks)
+        ]
+
+        if self._worker_pool is not None:
+            results = list(
+                self._worker_pool.map(collect_rollout_chunk_in_worker, tasks)
+            )
+        else:
+            with ProcessPoolExecutor(max_workers=self.config.rollout_workers) as pool:
+                results = list(pool.map(collect_rollout_chunk_in_worker, tasks))
+
+        results.sort(key=lambda r: r.chunk_index)
+        total_steps = sum(len(r.rewards) for r in results)
+        segment_ends = np.zeros(total_steps, dtype=np.bool_)
+        segment_bootstraps = np.zeros(total_steps, dtype=np.float32)
+        offset = 0
+        all_reset_seeds: list[int] = []
+        for r in results:
+            all_reset_seeds.extend(r.reset_seeds)
+            chunk_len = len(r.rewards)
+            end_idx = offset + chunk_len - 1
+            segment_ends[end_idx] = True
+            segment_bootstraps[end_idx] = r.next_value
+            offset += chunk_len
+
+        self._merge_worker_exposure(results)
+        self.last_rollout_seat_counts = quotas
+        self.last_rollout_reset_seeds = tuple(all_reset_seeds)
+        self.rollout_schedule.append(
+            {
+                "rollout": len(self.rollout_schedule) + 1,
+                "seat_quotas": list(quotas),
+                "reset_seeds": list(all_reset_seeds),
+            }
+        )
+
+        return Rollout(
+            np.concatenate([r.observations for r in results], axis=0),
+            np.concatenate([r.masks for r in results], axis=0),
+            np.concatenate([r.actions for r in results], axis=0),
+            np.concatenate([r.old_log_probs for r in results], axis=0),
+            np.concatenate([r.rewards for r in results], axis=0),
+            np.concatenate([r.dones for r in results], axis=0),
+            np.concatenate([r.values for r in results], axis=0),
+            float(results[-1].next_value),
+            np.concatenate([r.seat_ids for r in results], axis=0),
+            segment_ends,
+            segment_bootstraps,
+        )
+
     def collect_rollout(self) -> Rollout:
         """Collect equal-as-possible transition blocks for each learner seat."""
+        if self.config.rollout_workers > 1:
+            return self._collect_rollout_parallel()
         quotas = balanced_seat_quotas(
             self.config.rollout_steps, self.config.player_count
         )
@@ -171,9 +282,8 @@ class SeatBalancedPPOTrainer(PPOTrainer):
         observation = np.zeros(self.observation_size, dtype=np.float32)
 
         for learner_id, quota in enumerate(quotas):
-            env: Flip7VsOpponentsEnv | None = None
+            env = self.new_env(requested_learner_id=learner_id)
             try:
-                env = self.new_env(requested_learner_id=learner_id)
                 reset_seed = self._rng.randrange(2**31)
                 reset_seeds.append(reset_seed)
                 observation, info = env.reset(seed=reset_seed)
@@ -203,7 +313,7 @@ class SeatBalancedPPOTrainer(PPOTrainer):
                         float(cast(Tensor, distribution.log_prob(action_tensor)).item())
                     )
                     rewards.append(float(reward))
-                    dones.append(bool(terminated or truncated))
+                    dones.append(terminated or truncated)
                     values.append(float(value.item()))
                     seat_ids.append(learner_id)
                     observation, info = next_observation, next_info
@@ -229,8 +339,7 @@ class SeatBalancedPPOTrainer(PPOTrainer):
                             )
                         )
             finally:
-                if env is not None:
-                    env.close()
+                env.close()
 
         if not observations:
             raise RuntimeError("balanced rollout collected no transitions")
@@ -287,75 +396,81 @@ class StabilityLeaguePPOTrainer(SeatBalancedPPOTrainer):
             seat_opponent_provider=self.league.episode_lineup_for_seat,
         )
 
+    def _merge_worker_exposure(self, results: list[RolloutChunkResult]) -> None:
+        """Fold worker-side opponent exposure into the main-process league."""
+        for result in results:
+            self.league.merge_exposure(result.exposure)
+
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
         """Train and archive snapshots using the fixed final update contract."""
         if checkpoint is None:
             raise ValueError("StabilityLeaguePPOTrainer requires a checkpoint path")
-        history: list[dict[str, float]] = []
-        snapshot_dir = checkpoint.parent / "checkpoints"
-        for update in range(1, self.config.updates + 1):
-            self._current_update = update
-            self.league.set_training_update(update)
-            rollout = self.collect_rollout()
-            metrics = self.update(rollout)
-            metrics["update"] = float(update)
-            metrics["mean_reward"] = float(rollout.rewards.mean())
-            self.save_checkpoint(checkpoint, update)
-            if update >= self.league.config.warmup_updates and (
-                update == self.league.config.warmup_updates
-                or (update - self.league.config.warmup_updates)
-                % self.league.config.archive_interval
-                == 0
-            ):
-                snapshot_path = snapshot_dir / f"update-{update:04d}.pt"
-                self.save_checkpoint(
-                    snapshot_path,
-                    update,
-                    metadata={
-                        "policy_id": f"seed-{self.config.seed}-update-{update:04d}",
-                        "source_seed": self.config.seed,
-                        "snapshot_update": update,
-                        "observation": self.config.observation,
-                        "observation_size": self.observation_size,
-                        "action_size": self.action_size,
-                    },
-                )
-                response_signature = None
-                if self.league.config.response_signature_games > 0:
-                    response_signature = training_response_signature(
+        with self.worker_pool_scope():
+            history: list[dict[str, float]] = []
+            snapshot_dir = checkpoint.parent / "checkpoints"
+            for update in range(1, self.config.updates + 1):
+                self._current_update = update
+                self.league.set_training_update(update)
+                rollout = self.collect_rollout()
+                metrics = self.update(rollout)
+                metrics["update"] = float(update)
+                metrics["mean_reward"] = float(rollout.rewards.mean())
+                self.save_checkpoint(checkpoint, update)
+                if update >= self.league.config.warmup_updates and (
+                    update == self.league.config.warmup_updates
+                    or (update - self.league.config.warmup_updates)
+                    % self.league.config.archive_interval
+                    == 0
+                ):
+                    snapshot_path = snapshot_dir / f"update-{update:04d}.pt"
+                    self.save_checkpoint(
                         snapshot_path,
-                        observation=ObservationFamily(self.config.observation),
-                        baseline_names=self.league.config.baseline_names,
-                        games=self.league.config.response_signature_games,
-                        seed=self.config.seed * 100_000 + update,
+                        update,
+                        metadata={
+                            "policy_id": f"seed-{self.config.seed}-update-{update:04d}",
+                            "source_seed": self.config.seed,
+                            "snapshot_update": update,
+                            "observation": self.config.observation,
+                            "observation_size": self.observation_size,
+                            "action_size": self.action_size,
+                        },
                     )
-                self.league.register_snapshot(
-                    snapshot_path,
-                    update=update,
-                    seed=self.config.seed,
-                    response_signature=response_signature,
+                    response_signature = None
+                    if self.league.config.response_signature_games > 0:
+                        response_signature = training_response_signature(
+                            snapshot_path,
+                            observation=ObservationFamily(self.config.observation),
+                            baseline_names=self.league.config.baseline_names,
+                            games=self.league.config.response_signature_games,
+                            seed=self.config.seed * 100_000 + update,
+                        )
+                    self.league.register_snapshot(
+                        snapshot_path,
+                        update=update,
+                        seed=self.config.seed,
+                        response_signature=response_signature,
+                    )
+                metrics.update(
+                    {
+                        "population_size": float(len(self.league.snapshots)),
+                        "archived_population_size": float(
+                            len(self.league.archived_snapshots)
+                        ),
+                        "learned_opponent_probability": self.league.learned_probability,
+                        "seat_0_transitions": float(self.last_rollout_seat_counts[0]),
+                        "seat_1_transitions": float(self.last_rollout_seat_counts[1]),
+                        "seat_2_transitions": float(self.last_rollout_seat_counts[2]),
+                    }
                 )
-            metrics.update(
-                {
-                    "population_size": float(len(self.league.snapshots)),
-                    "archived_population_size": float(
-                        len(self.league.archived_snapshots)
-                    ),
-                    "learned_opponent_probability": self.league.learned_probability,
-                    "seat_0_transitions": float(self.last_rollout_seat_counts[0]),
-                    "seat_1_transitions": float(self.last_rollout_seat_counts[1]),
-                    "seat_2_transitions": float(self.last_rollout_seat_counts[2]),
-                }
-            )
-            total = sum(self.league.exposure.values())
-            learned = sum(
-                count
-                for key, count in self.league.exposure.items()
-                if key.startswith("snapshot:")
-            )
-            metrics["learned_opponent_share"] = learned / total if total else 0.0
-            history.append(metrics)
-        return history
+                total = sum(self.league.exposure.values())
+                learned = sum(
+                    count
+                    for key, count in self.league.exposure.items()
+                    if key.startswith("snapshot:")
+                )
+                metrics["learned_opponent_share"] = learned / total if total else 0.0
+                history.append(metrics)
+            return history
 
 
 class StabilityControlPPOTrainer(SeatBalancedPPOTrainer):
@@ -372,23 +487,24 @@ class StabilityControlPPOTrainer(SeatBalancedPPOTrainer):
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
         if checkpoint is None:
             raise ValueError("StabilityControlPPOTrainer requires a checkpoint path")
-        history: list[dict[str, float]] = []
-        for update in range(1, self.config.updates + 1):
-            self._current_update = update
-            rollout = self.collect_rollout()
-            metrics = self.update(rollout)
-            metrics["update"] = float(update)
-            metrics["mean_reward"] = float(rollout.rewards.mean())
-            self.save_checkpoint(checkpoint, update)
-            metrics.update(
-                {
-                    "seat_0_transitions": float(self.last_rollout_seat_counts[0]),
-                    "seat_1_transitions": float(self.last_rollout_seat_counts[1]),
-                    "seat_2_transitions": float(self.last_rollout_seat_counts[2]),
-                }
-            )
-            history.append(metrics)
-        return history
+        with self.worker_pool_scope():
+            history: list[dict[str, float]] = []
+            for update in range(1, self.config.updates + 1):
+                self._current_update = update
+                rollout = self.collect_rollout()
+                metrics = self.update(rollout)
+                metrics["update"] = float(update)
+                metrics["mean_reward"] = float(rollout.rewards.mean())
+                self.save_checkpoint(checkpoint, update)
+                metrics.update(
+                    {
+                        "seat_0_transitions": float(self.last_rollout_seat_counts[0]),
+                        "seat_1_transitions": float(self.last_rollout_seat_counts[1]),
+                        "seat_2_transitions": float(self.last_rollout_seat_counts[2]),
+                    }
+                )
+                history.append(metrics)
+            return history
 
 
 __all__ = [
@@ -397,6 +513,7 @@ __all__ = [
     "StabilityControlPPOTrainer",
     "StabilityLeaguePPOTrainer",
     "balanced_seat_quotas",
+    "partition_seat_tasks",
     "training_response_signature",
     "write_followup_population",
     "write_history",

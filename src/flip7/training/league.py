@@ -25,6 +25,7 @@ from flip7.training.ppo import (
     EpisodeLineup,
     PPOConfig,
     PPOTrainer,
+    RolloutChunkResult,
     baseline_factories,
 )
 
@@ -113,6 +114,10 @@ class PolicyLeague:
     def exposure(self) -> Mapping[str, int]:
         """Return cumulative opponent-selection counts."""
         return dict(self._exposure)
+
+    def merge_exposure(self, counts: Mapping[str, int]) -> None:
+        """Fold opponent-selection counts sampled in a worker process."""
+        self._exposure.update(counts)
 
     def episode_lineup(self, rng: random.Random, player_count: int) -> EpisodeLineup:
         """Build one seeded lineup with a uniformly sampled learner seat."""
@@ -283,54 +288,60 @@ class LeaguePPOTrainer(PPOTrainer):
             opponent_provider=self.league.episode_lineup,
         )
 
+    def _merge_worker_exposure(self, results: list[RolloutChunkResult]) -> None:
+        """Fold worker-side opponent exposure into the main-process league."""
+        for result in results:
+            self.league.merge_exposure(result.exposure)
+
     def train(self, checkpoint: Path | None = None) -> list[dict[str, float]]:
         """Train and periodically archive frozen snapshots for later episodes."""
         if checkpoint is None:
             msg = "LeaguePPOTrainer requires a checkpoint path for snapshots"
             raise ValueError(msg)
-        history: list[dict[str, float]] = []
-        snapshot_dir = checkpoint.parent / "checkpoints"
-        for update in range(1, self.config.updates + 1):
-            rollout = self.collect_rollout()
-            metrics = self.update(rollout)
-            metrics["update"] = float(update)
-            metrics["mean_reward"] = float(rollout.rewards.mean())
+        with self.worker_pool_scope():
+            history: list[dict[str, float]] = []
+            snapshot_dir = checkpoint.parent / "checkpoints"
+            for update in range(1, self.config.updates + 1):
+                rollout = self.collect_rollout()
+                metrics = self.update(rollout)
+                metrics["update"] = float(update)
+                metrics["mean_reward"] = float(rollout.rewards.mean())
 
-            self.save_checkpoint(checkpoint, update)
-            if (
-                update >= self.league.config.warmup_updates
-                and update % self.league.config.snapshot_interval == 0
-            ):
-                snapshot_path = snapshot_dir / f"update-{update:04d}.pt"
-                policy_id = f"seed-{self.config.seed}-update-{update:04d}"
-                self.save_checkpoint(
-                    snapshot_path,
-                    update,
-                    metadata={
-                        "policy_id": policy_id,
-                        "source_seed": self.config.seed,
-                        "snapshot_update": update,
-                        "observation": self.config.observation,
-                        "observation_size": self.observation_size,
-                        "action_size": self.action_size,
-                    },
-                )
-                self.league.register_snapshot(
-                    snapshot_path, update=update, seed=self.config.seed
-                )
+                self.save_checkpoint(checkpoint, update)
+                if (
+                    update >= self.league.config.warmup_updates
+                    and update % self.league.config.snapshot_interval == 0
+                ):
+                    snapshot_path = snapshot_dir / f"update-{update:04d}.pt"
+                    policy_id = f"seed-{self.config.seed}-update-{update:04d}"
+                    self.save_checkpoint(
+                        snapshot_path,
+                        update,
+                        metadata={
+                            "policy_id": policy_id,
+                            "source_seed": self.config.seed,
+                            "snapshot_update": update,
+                            "observation": self.config.observation,
+                            "observation_size": self.observation_size,
+                            "action_size": self.action_size,
+                        },
+                    )
+                    self.league.register_snapshot(
+                        snapshot_path, update=update, seed=self.config.seed
+                    )
 
-            total_exposure = sum(self.league.exposure.values())
-            learned_exposure = sum(
-                count
-                for key, count in self.league.exposure.items()
-                if key.startswith("snapshot:")
-            )
-            metrics["population_size"] = float(len(self.league.snapshots))
-            metrics["learned_opponent_share"] = (
-                learned_exposure / total_exposure if total_exposure else 0.0
-            )
-            history.append(metrics)
-        return history
+                total_exposure = sum(self.league.exposure.values())
+                learned_exposure = sum(
+                    count
+                    for key, count in self.league.exposure.items()
+                    if key.startswith("snapshot:")
+                )
+                metrics["population_size"] = float(len(self.league.snapshots))
+                metrics["learned_opponent_share"] = (
+                    learned_exposure / total_exposure if total_exposure else 0.0
+                )
+                history.append(metrics)
+            return history
 
 
 def write_population(path: Path, league: PolicyLeague) -> None:
