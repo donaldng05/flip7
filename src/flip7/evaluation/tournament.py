@@ -33,12 +33,10 @@ def load_worker_policy(checkpoint_path: Path) -> Agent:
     if "actor_state" in payload:
         from flip7.training.mappo import MAPPOAgent
 
-        return MAPPOAgent.from_checkpoint(
-            checkpoint_path, deterministic=True, device="cpu"
-        )
+        return MAPPOAgent.from_payload(payload, deterministic=True, device="cpu")
     from flip7.agents import PPOAgent
 
-    return PPOAgent.from_checkpoint(checkpoint_path, deterministic=True, device="cpu")
+    return PPOAgent.from_payload(payload, deterministic=True, device="cpu")
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +181,12 @@ def run_matchup(
     workers: int = 1,
     checkpoint_paths: Mapping[str, Path | str] | None = None,
 ) -> MatchupMetrics:
-    """Run repeated games for one explicit seat lineup."""
+    """Run repeated games for one explicit seat lineup.
+
+    When workers > 1, baseline names resolve to default factories and every
+    other name must map to a checkpoint path; the passed roster factories
+    are ignored in that case.
+    """
     if len(names) < 3:
         raise ValueError("a matchup requires at least three seats")
     if player_count is not None and player_count != len(names):

@@ -26,12 +26,17 @@ def run_standard_evaluations(
     seed_offset: int,
     observation: ObservationFamily,
     policy_factory: Callable[[], Agent] | None = None,
-    workers: int = 1,
+    workers: int | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    """Run rotated baseline and held-out evaluation matchups for a checkpoint."""
+    """Run rotated baseline and held-out evaluation matchups for a checkpoint.
+
+    When workers > 1, policies load from checkpoint inside workers and any
+    passed policy_factory is ignored. An explicit workers value always wins
+    over the evaluation.workers config value.
+    """
     evaluation = as_mapping(root["evaluation"], "evaluation")
-    if workers == 1 and "workers" in evaluation:
-        workers = int(cast(int | str, evaluation["workers"]))
+    if workers is None:
+        workers = int(cast(int | str, evaluation.get("workers", 1)))
     seed_bases = as_ints(evaluation["seed_bases"], "evaluation.seed_bases")
     heldout_bases = as_ints(
         evaluation["heldout_seed_bases"], "evaluation.heldout_seed_bases"
