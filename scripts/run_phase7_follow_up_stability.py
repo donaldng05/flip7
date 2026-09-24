@@ -280,9 +280,7 @@ def _run_condition(
     if trainer_name == "control":
         trainer: Any = StabilityControlPPOTrainer(config, baseline_names)
     elif trainer_name == "league":
-        trainer = StabilityLeaguePPOTrainer(
-            config, league_config=league_config, workers=workers
-        )
+        trainer = StabilityLeaguePPOTrainer(config, league_config=league_config)
     else:
         raise ValueError(f"unsupported stability trainer: {trainer_name}")
     history = trainer.train(checkpoint)
