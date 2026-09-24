@@ -15,8 +15,16 @@ from flip7.evaluation import (
     run_rotated_matchups,
     summarize_rotated_results,
 )
+from flip7.evaluation.tournament import load_worker_policy
 from flip7.experiment import run_standard_evaluations
-from flip7.training import PPOConfig, PPOTrainer, baseline_factories
+from flip7.training import (
+    MAPPOAgent,
+    MAPPOConfig,
+    MAPPOTrainer,
+    PPOConfig,
+    PPOTrainer,
+    baseline_factories,
+)
 
 
 def _create_checkpoint(target_dir: Path, seed: int = 3) -> Path:
@@ -69,6 +77,56 @@ def test_run_matchup_checkpoint_worker_invariance(tmp_path: Path) -> None:
         observation=ObservationFamily.BASIC,
         workers=2,
         checkpoint_paths={"ppo": ckpt},
+    )
+    assert w1.as_dict() == w2.as_dict()
+
+
+def _create_mappo_checkpoint(target_dir: Path) -> Path:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / "mappo.pt"
+    MAPPOTrainer(
+        MAPPOConfig(
+            seed=9,
+            hidden_size=8,
+            rollout_steps=8,
+            updates=1,
+            epochs=1,
+            minibatch_size=4,
+        )
+    ).save_checkpoint(path, 1)
+    return path
+
+
+def test_load_worker_policy_dispatches_ppo_and_mappo(tmp_path: Path) -> None:
+    ppo_ckpt = _create_checkpoint(tmp_path / "dispatch_ppo")
+    mappo_ckpt = _create_mappo_checkpoint(tmp_path / "dispatch_mappo")
+    assert isinstance(load_worker_policy(ppo_ckpt), PPOAgent)
+    assert isinstance(load_worker_policy(mappo_ckpt), MAPPOAgent)
+
+
+def test_run_matchup_mappo_worker_invariance(tmp_path: Path) -> None:
+    mappo_ckpt = _create_mappo_checkpoint(tmp_path / "mappo_agent")
+    roster = baseline_factories() | {
+        "mappo": lambda: MAPPOAgent.from_checkpoint(mappo_ckpt, deterministic=True),
+    }
+    lineup = ("random", "mappo", "random")
+    w1 = run_matchup(
+        lineup,
+        roster,
+        games=2,
+        seed=7,
+        observation=ObservationFamily.BASIC,
+        workers=1,
+        checkpoint_paths={"mappo": mappo_ckpt},
+    )
+    w2 = run_matchup(
+        lineup,
+        roster,
+        games=2,
+        seed=7,
+        observation=ObservationFamily.BASIC,
+        workers=2,
+        checkpoint_paths={"mappo": mappo_ckpt},
     )
     assert w1.as_dict() == w2.as_dict()
 

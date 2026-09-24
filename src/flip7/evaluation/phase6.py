@@ -94,7 +94,12 @@ def run_rotated_matchups(
     checkpoint_path: Path | str | None = None,
     checkpoint_paths: Mapping[str, Path | str] | None = None,
 ) -> list[MatchupMetrics]:
-    """Evaluate one PPO policy in every seat for each Phase 6 matchup."""
+    """Evaluate one PPO policy in every seat for each Phase 6 matchup.
+
+    When workers > 1, baseline names resolve to default factories and the
+    learner policy loads from checkpoint_path(s); in-memory factories are
+    ignored in that case.
+    """
     if len(seed_bases) != len(matchups):
         raise ValueError("one evaluation seed base is required per matchup")
     if games < 1:
