@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +11,7 @@ import pytest
 
 from flip7.training.league_followup import FollowUpLeagueConfig
 from flip7.training.ppo import (
+    EpisodeLineup,
     PPOConfig,
     PPOTrainer,
     Rollout,
@@ -364,3 +367,59 @@ def test_persistent_worker_pool_lifecycle(tmp_path: Path) -> None:
     assert trainer.worker_pool is None
     assert len(history) == 2
     assert checkpoint.is_file()
+
+
+def test_parallel_rollout_rejects_unpicklable_provider() -> None:
+    def _local_provider(rng: random.Random, count: int) -> EpisodeLineup:
+        # Nested scope makes this unpicklable while remaining callable.
+        return BalancedBaselineProvider(("random",)).episode_lineup(rng, count)
+
+    with pytest.raises(ValueError, match="must be picklable"):
+        PPOTrainer(
+            PPOConfig(seed=1, rollout_steps=16, rollout_workers=2),
+            opponent_provider=_local_provider,
+        )
+
+    # Serial construction stays permissive: the check is parallel-gated.
+    PPOTrainer(
+        PPOConfig(seed=1, rollout_steps=16),
+        opponent_provider=_local_provider,
+    )
+
+
+def test_seat_balanced_parallel_rejects_two_arg_provider() -> None:
+    provider = BalancedBaselineProvider(("random", "threshold"))
+    two_arg_seat_provider = partial(provider.episode_lineup, learner_id=0)
+    trainer = SeatBalancedPPOTrainer(
+        PPOConfig(seed=2, rollout_steps=6, rollout_workers=2),
+        opponent_provider=provider.episode_lineup,
+        seat_opponent_provider=two_arg_seat_provider,
+    )
+    with pytest.raises(ValueError, match="requested_learner_id"):
+        trainer.collect_rollout()
+
+
+def test_stability_league_train_archives_with_serial_signatures(
+    tmp_path: Path,
+) -> None:
+    config = PPOConfig(
+        seed=9,
+        rollout_steps=6,
+        updates=2,
+        hidden_size=8,
+        observation="basic",
+        minibatch_size=4,
+    )
+    league_config = FollowUpLeagueConfig(
+        warmup_updates=1,
+        archive_interval=1,
+        state_bank_size=8,
+        baseline_names=("random", "threshold"),
+        response_signature_games=1,
+        learned_opponent_probability=0.0,
+    )
+    trainer = StabilityLeaguePPOTrainer(config, league_config=league_config)
+    history = trainer.train(tmp_path / "ckpt.pt")
+    assert len(history) == 2
+    assert len(trainer.league.archived_snapshots) == 2
+    assert len(trainer.league.response_signatures) == 2

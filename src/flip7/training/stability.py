@@ -6,7 +6,7 @@ import random
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -67,9 +67,11 @@ def training_response_signature(
     baseline_names: tuple[str, ...],
     games: int,
     seed: int,
-    workers: int = 1,
 ) -> tuple[float, ...]:
     """Measure a checkpoint against training-only baseline matchups.
+
+    Always serial by design: a handful of games can never amortize the cost
+    of spawning a worker pool, and this runs once per archived snapshot.
 
     The imports are local so the evaluation package can continue importing the
     training package without creating an import cycle.
@@ -98,8 +100,6 @@ def training_response_signature(
         seed_bases=tuple(seed + index * 10_000 for index in range(len(matchups))),
         observation=observation,
         matchups=matchups,
-        workers=workers,
-        checkpoint_path=checkpoint,
     )
     signature: list[float] = []
     for result in results:
@@ -182,6 +182,10 @@ class SeatBalancedPPOTrainer(PPOTrainer):
             opponent_provider=opponent_provider,
             seat_opponent_provider=seat_opponent_provider,
         )
+
+    def _parallel_provider(self) -> Any:
+        """Return the seat provider shipped to parallel rollout workers."""
+        return self._seat_opponent_provider
 
     def _collect_rollout_parallel(self) -> Rollout:
         quotas = balanced_seat_quotas(
@@ -379,9 +383,7 @@ class StabilityLeaguePPOTrainer(SeatBalancedPPOTrainer):
         config: PPOConfig,
         *,
         league_config: FollowUpLeagueConfig,
-        workers: int = 1,
     ) -> None:
-        self.workers = workers
         self.league = DiversePolicyLeague(
             league_config,
             observation=ObservationFamily(config.observation),
@@ -441,7 +443,6 @@ class StabilityLeaguePPOTrainer(SeatBalancedPPOTrainer):
                             baseline_names=self.league.config.baseline_names,
                             games=self.league.config.response_signature_games,
                             seed=self.config.seed * 100_000 + update,
-                            workers=self.workers,
                         )
                     self.league.register_snapshot(
                         snapshot_path,
