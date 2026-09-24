@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import pickle
 import random
 from collections import Counter
 from collections.abc import Callable, Generator, Mapping
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any, cast
 
@@ -254,6 +256,35 @@ def _provider_exposure(provider: Any) -> dict[str, int] | None:
     return dict(owner.exposure)
 
 
+def _takes_explicit_seat(provider: Any) -> bool:
+    """Return True if the provider accepts a requested learner seat argument."""
+    try:
+        parameters = signature(provider).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    positional = sum(
+        1
+        for parameter in parameters
+        if parameter.kind
+        in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    variadic = any(
+        parameter.kind is Parameter.VAR_POSITIONAL for parameter in parameters
+    )
+    return positional >= 3 or (variadic and positional >= 2)
+
+
+def _require_picklable_provider(provider: Any) -> None:
+    """Fail fast when a provider cannot cross the rollout worker boundary."""
+    try:
+        pickle.dumps(provider)
+    except Exception as exc:
+        raise ValueError(
+            "rollout opponent provider must be picklable to use "
+            f"rollout_workers > 1; got {provider!r}: {exc}"
+        ) from exc
+
+
 def collect_rollout_chunk_in_worker(
     task: RolloutChunkTask,
 ) -> RolloutChunkResult:
@@ -293,13 +324,15 @@ def collect_rollout_chunk_in_worker(
 
     def _create_env(requested_id: int | None) -> Flip7VsOpponentsEnv:
         provider = task.opponent_provider
-        if requested_id is not None:
-            try:
-                lineup = provider(worker_rng, task.player_count, requested_id)
-            except TypeError:
-                lineup = provider(worker_rng, task.player_count)
-        else:
+        if requested_id is None:
             lineup = provider(worker_rng, task.player_count)
+        elif not _takes_explicit_seat(provider):
+            raise ValueError(
+                "seat-balanced rollout requires an opponent provider accepting "
+                f"(rng, player_count, requested_learner_id); got {provider!r}"
+            )
+        else:
+            lineup = provider(worker_rng, task.player_count, requested_id)
         if not 0 <= lineup.learner_id < task.player_count:
             raise ValueError("opponent provider returned an invalid learner seat")
         return Flip7VsOpponentsEnv(
@@ -470,6 +503,8 @@ class PPOTrainer:
         self._is_custom_provider = opponent_provider is not None
         self._opponent_provider = opponent_provider or self._default_opponent_provider
         self._seat_opponent_provider = seat_opponent_provider
+        if config.rollout_workers > 1:
+            _require_picklable_provider(self._parallel_provider())
         self._current_update = 1
         self._worker_pool: ProcessPoolExecutor | None = None
         seed_torch(config.seed)
@@ -664,6 +699,17 @@ class PPOTrainer:
             segment_ends,
             segment_bootstraps,
         )
+
+    def _parallel_provider(self) -> Any:
+        """Return the opponent provider shipped to rollout workers.
+
+        Mirrors _collect_rollout_parallel: the default path ships the
+        picklable BaselineOpponentProvider, never the bound default method
+        (which would drag the whole trainer, including lambda factories).
+        """
+        if self._is_custom_provider:
+            return self._opponent_provider
+        return self._default_provider
 
     def _merge_worker_exposure(self, results: list[RolloutChunkResult]) -> None:
         """Fold worker-side opponent exposure into the main-process league.
