@@ -249,6 +249,11 @@ def collect_rollout_chunk_in_worker(
 ) -> RolloutChunkResult:
     """Collect an independent trajectory chunk in a CPU worker process."""
     torch.set_num_threads(1)
+    # Seed the global torch RNG per task: Categorical.sample() below draws from
+    # it, and without this, forked workers share identical streams (correlated
+    # chunks) while spawned workers draw fresh entropy (unreproducible reruns).
+    # Task seeds are distinct per chunk within a rollout.
+    torch.manual_seed(task.seed)  # pyright: ignore[reportUnknownMemberType]
     if task.network_type == "separate":
         network: ActorCritic | SeparateActorCritic = SeparateActorCritic(
             task.observation_size,
