@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from flip7.training.league_followup import FollowUpLeagueConfig
 from flip7.training.ppo import (
     PPOConfig,
     PPOTrainer,
@@ -17,6 +18,7 @@ from flip7.training.ppo import (
 from flip7.training.stability import (
     BalancedBaselineProvider,
     SeatBalancedPPOTrainer,
+    StabilityLeaguePPOTrainer,
     balanced_seat_quotas,
     partition_seat_tasks,
 )
@@ -217,6 +219,50 @@ def test_seat_balanced_parallel_rerun_determinism() -> None:
     _assert_rollouts_equal(
         _make_trainer().collect_rollout(), _make_trainer().collect_rollout()
     )
+
+
+def test_league_parallel_rollout_merges_exposure_deterministically(
+    tmp_path: Path,
+) -> None:
+    """League+parallel must pickle safely and merge worker exposure counts."""
+    snapshot_path = tmp_path / "snap.pt"
+    PPOTrainer(
+        PPOConfig(
+            seed=5,
+            observation="basic",
+            rollout_steps=8,
+            updates=1,
+            epochs=1,
+            minibatch_size=4,
+            hidden_size=8,
+        ),
+        opponent_names=("random",),
+    ).train(snapshot_path)
+
+    def _make_trainer() -> StabilityLeaguePPOTrainer:
+        trainer = StabilityLeaguePPOTrainer(
+            PPOConfig(
+                seed=11,
+                rollout_steps=30,
+                rollout_workers=2,
+                observation="basic",
+                hidden_size=8,
+            ),
+            league_config=FollowUpLeagueConfig(state_bank_size=32),
+        )
+        trainer.league.register_snapshot(snapshot_path, update=10, seed=5)
+        return trainer
+
+    first, second = _make_trainer(), _make_trainer()
+    before = sum(first.league.exposure.values())
+    _assert_rollouts_equal(first.collect_rollout(), second.collect_rollout())
+
+    assert first.league.exposure == second.league.exposure
+    merged = sum(first.league.exposure.values()) - before
+    # Every created env fills 2 opponent slots; a dropped merge would read 0.
+    assert merged == 2 * len(first.last_rollout_reset_seeds) > 0
+    for key in first.league.exposure:
+        assert key.startswith(("baseline:", "snapshot:"))
 
 
 def test_gae_chunk_boundaries_prevent_cross_chunk_leakage() -> None:
