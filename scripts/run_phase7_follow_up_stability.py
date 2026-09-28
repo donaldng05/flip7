@@ -11,6 +11,7 @@ import queue
 import time
 import traceback
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,11 +89,9 @@ def _limit_worker_threads() -> None:
     import torch
 
     torch.set_num_threads(1)
-    try:
+    # PyTorch only permits setting this before its inter-op pool is used.
+    with suppress(RuntimeError):
         torch.set_num_interop_threads(1)
-    except RuntimeError:
-        # PyTorch only permits setting this before its inter-op pool is used.
-        pass
 
 
 def _execute_process_job(kind: str, payload: Mapping[str, object]) -> dict[str, object]:
@@ -117,9 +116,7 @@ def _execute_process_job(kind: str, payload: Mapping[str, object]) -> dict[str, 
                 else None
             ),
             run_full_tournament=cast(bool, kwargs["run_full_tournament"]),
-            defer_candidate_tournament=cast(
-                bool, kwargs["defer_candidate_tournament"]
-            ),
+            defer_candidate_tournament=cast(bool, kwargs["defer_candidate_tournament"]),
         )
     if kind == "paired-heldout":
         return _paired_heldout_for_seed(
@@ -232,7 +229,9 @@ def _run_bounded_process_jobs(
                 continue
 
             if job_id not in active:
-                raise RuntimeError(f"received an unknown {stage_name} job result: {job_id}")
+                raise RuntimeError(
+                    f"received an unknown {stage_name} job result: {job_id}"
+                )
             process, started_at = active.pop(job_id)
             process.join()
             elapsed = time.perf_counter() - started_at
@@ -566,7 +565,9 @@ def _run_condition(
             direct = direct_final_warmup_comparison(
                 final_participant,
                 next(item for item in participants if item.name == warmup.policy_id),
-                tuple(item for item in participants if item.name in set(baseline_names)),
+                tuple(
+                    item for item in participants if item.name in set(baseline_names)
+                ),
                 games=focused_games,
                 seed=int(tournament_values["seed"]) + seed + 900_000,
             )
@@ -1009,9 +1010,7 @@ def _paired_heldout_comparisons(
     }
     diverse_name = _selected_condition_name(root, rows)
     diverse = {
-        int(row["seed"]): row
-        for row in rows
-        if row.get("condition") == diverse_name
+        int(row["seed"]): row for row in rows if row.get("condition") == diverse_name
     }
     if not latest_seeds or not diverse:
         return []
@@ -1459,13 +1458,9 @@ def main() -> None:
                         "active_mean_pairwise_action_disagreement": _active_metric(
                             diversity, "mean_pairwise_action_disagreement"
                         ),
-                        "focused_tournament": diversity.get(
-                            "focused_tournament_elo"
-                        ),
+                        "focused_tournament": diversity.get("focused_tournament_elo"),
                         "full_tournament": diversity.get("full_tournament_elo"),
-                        "direct_final_warmup": tournament.get(
-                            "direct_final_warmup"
-                        ),
+                        "direct_final_warmup": tournament.get("direct_final_warmup"),
                         "candidate_tournament_deferred": manifest.get(
                             "focused_tournament_deferred", False
                         ),
@@ -1532,12 +1527,7 @@ def main() -> None:
         for seed in seeds:
             job_id = f"{fallback_name}:seed-{seed}"
             fallback_order.append(job_id)
-            fallback_dir = (
-                output_root
-                / args.stage
-                / fallback_name
-                / f"seed-{seed}"
-            )
+            fallback_dir = output_root / args.stage / fallback_name / f"seed-{seed}"
             if args.resume and (fallback_dir / "manifest.json").is_file():
                 manifest = _mapping(
                     json.loads(
@@ -1591,13 +1581,9 @@ def main() -> None:
                         "active_mean_pairwise_action_disagreement": _active_metric(
                             diversity, "mean_pairwise_action_disagreement"
                         ),
-                        "focused_tournament": diversity.get(
-                            "focused_tournament_elo"
-                        ),
+                        "focused_tournament": diversity.get("focused_tournament_elo"),
                         "full_tournament": diversity.get("full_tournament_elo"),
-                        "direct_final_warmup": tournament.get(
-                            "direct_final_warmup"
-                        ),
+                        "direct_final_warmup": tournament.get("direct_final_warmup"),
                         "candidate_tournament_deferred": manifest.get(
                             "focused_tournament_deferred", False
                         ),
@@ -1623,9 +1609,7 @@ def main() -> None:
                             "full_games": full_games,
                             "workers": workers,
                             "job_workers": job_workers,
-                            "observation_override": str(
-                                fallback_values["observation"]
-                            ),
+                            "observation_override": str(fallback_values["observation"]),
                             "training_override": training_override,
                             "run_full_tournament": (
                                 not args.skip_full_population_tournament
@@ -1710,7 +1694,9 @@ def main() -> None:
     runtime = {
         "base_condition_jobs_seconds": base_condition_jobs_seconds,
         "fallback_condition_jobs_seconds": fallback_condition_jobs_seconds,
-        "selected_candidate_tournaments_seconds": selected_candidate_tournaments_seconds,
+        "selected_candidate_tournaments_seconds": (
+            selected_candidate_tournaments_seconds
+        ),
         "paired_heldout_seconds": paired_heldout_seconds,
         "total_seconds": time.perf_counter() - stage_started,
     }
