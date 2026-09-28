@@ -155,3 +155,120 @@ Full-parallel win-share CIs overlap frozen on both seeds
 at the tripwire, consistent with estimator noise at n=60/seat) and
 +3.4pp on seed 17. Pooled win share moved 63.6% to 60.4%, within noise.
 Full parallel runs 1.8x faster than serial at guardrail budget.
+
+## Full Phase 7 seat-robustness screening on parallel main (2026-09-27, CPU/Windows)
+
+Measured on `main` at `6e5ff6f`, after parallel rollout and evaluation
+changes were merged:
+
+```powershell
+uv run python -u scripts/run_phase7_follow_up_stability.py `
+  --config configs/phase7-resolve.yaml `
+  --stage screening `
+  --workers 4 `
+  --rollout-workers 4 `
+  --skip-full-population-tournament `
+  --output-root artifacts/phase7-resolve/parallel-screening-2026-09-27
+```
+
+- Wall clock: `3600.4s` (`60.0 min`, including runner startup).
+- Screening budget: seeds `7, 17, 27`; 100 updates; 100 games per seat.
+- The four base conditions plus the required `seat_aware_response_diverse`
+  fallback completed: 15 training/evaluation jobs total.
+- Focused tournaments and paired held-out comparisons ran; the documented
+  non-gating full-population tournament was skipped.
+- Artifacts: `artifacts/phase7-resolve/parallel-screening-2026-09-27/`.
+
+The fallback still failed the stable-adaptation screen: seed 7 had a 12.0pp
+seat spread against the 5pp target (seeds 17 and 27 had 4.7pp and 2.5pp).
+The diversity-benefit gate also failed (active JS ratio `0.92`, target
+`1.20`). Since this was the corrected sparse-win control screen, the next
+protocol stage is the potential-win screening; confirmation remains gated on
+that intervention passing its screening gates.
+
+The runner processes condition/seed jobs sequentially; the worker settings
+parallelize rollouts and games inside a job. Once the scientific recipe is
+ready for another screen, bounded concurrency across independent jobs is the
+next runtime change to evaluate, with a single CPU worker budget to avoid
+oversubscribing the nested rollout and evaluation pools.
+
+## Bounded job scheduling for follow-up screens
+
+The `continue-screen-speedup` branch adds bounded process-level concurrency to
+`run_phase7_follow_up_stability.py`. Independent condition/seed jobs now run in
+a dynamically filled queue, including required fallback jobs after the base
+screen, selected-candidate tournaments after fallback selection, and the
+per-seed paired held-out comparisons. Each job remains isolated so its random
+state and output directory are independent. Every condition retains training,
+rotated evaluation, and diversity analysis; focused Elo and direct warmup
+comparisons run only for the selected candidate. The seed, update, game, and
+gate budgets are unchanged.
+
+The default `--job-workers` value is CPU-budgeted as
+`min(4, logical_cpus // (max(--workers, --rollout-workers) + 1))`, with a
+minimum of one. Numerical-library and PyTorch worker threads are capped at one
+to keep nested pools within that budget. Each run manifest and evaluation file
+now records training, evaluation, tournament, diversity, persistence, and total
+seconds; the stage summary records base-job, fallback-job,
+selected-candidate-tournament, paired-evaluation, and total wall time.
+
+For a 16-logical-CPU runner, a useful first target configuration is four jobs
+with three rollout/evaluation workers per job (at most 16 job and worker
+processes during the nested phases):
+
+```powershell
+uv run python -u scripts/run_phase7_follow_up_stability.py `
+  --config configs/phase7-resolve.yaml `
+  --stage screening `
+  --workers 3 `
+  --rollout-workers 3 `
+  --job-workers 4 `
+  --skip-full-population-tournament `
+  --output-root artifacts/phase7-resolve/job-parallel-screening
+```
+
+For the protocol's potential-win intervention, add
+`--training-reward potential_win`. To continue an interrupted screen, use
+`--resume` with the same output root and scientific settings.
+
+## Potential-win screen measurement (2026-09-27)
+
+Ran the recommended four-job/three-inner-worker configuration with the
+potential-win intervention and the original screening budgets. The stage
+summary reports `1689.9s` (`28.2 min`), including `1246.0s` for the 12 base
+jobs, `414.4s` for the three required fallback jobs, and `29.5s` for paired
+held-out comparisons. Artifacts are in
+`artifacts/phase7-resolve/potential-win-job-parallel-2026-09-27/`.
+
+Average per-job timings were about 3.0–3.4 min for training/checkpointing,
+0.7–0.9 min for rotated evaluation, 1.4–2.3 min for focused tournaments, and
+0.4–0.5 min for direct final/warmup comparisons. This measurement predates the
+selected-candidate tournament deferral in the current branch, so the 15–20
+minute target remains unmeasured after that change. Deferral should remove
+those tournament costs from non-selected conditions while preserving their
+training and screening evaluations; a new full run is needed to establish the
+actual wall time.
+
+The screen selected `seat_aware_response_diverse` but failed both gates. Its
+seat spreads were 10.3pp, 3.5pp, and 6.3pp against the 5pp limit. The diversity
+ratio was 1.41, but paired held-out mean difference was -0.83pp (95% CI
+[-2.39pp, 0.72pp]), behavior did not pass, and no matchup had a positive mean.
+
+## Staged potential-win screen measurement (2026-09-27)
+
+Repeated the same full screening budget on `continue-screen-speedup`, now
+deferring focused tournaments and direct warmup comparisons until the fallback
+candidate was selected. The runner reported `1144.2s` (`19:04`), within the
+15–20 minute target by about 56 seconds. Stage timings were `738.9s` for the
+12 base jobs, `227.0s` for the three required fallback jobs, `148.6s` for the
+selected candidate tournaments, and `29.7s` for paired held-out comparisons.
+Artifacts are in
+`artifacts/phase7-resolve/potential-win-job-parallel-staged-2026-09-27/`.
+
+That is `545.7s` (`9:06`, about 32%) faster than the previous `1689.9s`
+potential-win screen. It meets the requested upper bound, though with less than
+a minute of margin on this 16-logical-CPU machine. The gates still failed: the
+selected `seat_aware_response_diverse` candidate had seat spreads of 10.33pp,
+3.50pp, and 6.33pp against a 5pp limit. Diversity benefit had a -0.83pp paired
+mean difference (95% CI -2.39pp to +0.72pp), active JS ratio 1.414, behavior
+failed, and zero positive matchups.
