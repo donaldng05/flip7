@@ -5,9 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing as mp
+import os
+import queue
+import time
+import traceback
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from flip7 import __version__
@@ -66,6 +73,209 @@ _training_config = training_config
 _mappo_config = mappo_config
 _cached_policy = cached_policy
 _evaluate = run_standard_evaluations
+
+
+def _limit_worker_threads() -> None:
+    """Keep nested numerical libraries from oversubscribing the CPU budget."""
+    for name in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
+        os.environ[name] = "1"
+    import torch
+
+    torch.set_num_threads(1)
+    # PyTorch only permits setting this before its inter-op pool is used.
+    with suppress(RuntimeError):
+        torch.set_num_interop_threads(1)
+
+
+def _execute_process_job(kind: str, payload: Mapping[str, object]) -> dict[str, object]:
+    if kind == "condition":
+        kwargs = _mapping(payload["kwargs"], "job.kwargs")
+        training_values = kwargs.get("training_override")
+        return _run_condition(
+            _mapping(payload["root"], "job.root"),
+            _mapping(payload["condition"], "job.condition"),
+            int(payload["seed"]),
+            Path(str(payload["output_root"])),
+            updates=int(kwargs["updates"]),
+            games=int(kwargs["games"]),
+            focused_games=int(kwargs["focused_games"]),
+            full_games=int(kwargs["full_games"]),
+            workers=int(kwargs["workers"]),
+            job_workers=int(kwargs["job_workers"]),
+            observation_override=cast(str | None, kwargs["observation_override"]),
+            training_override=(
+                _mapping(training_values, "job.training_override")
+                if isinstance(training_values, Mapping)
+                else None
+            ),
+            run_full_tournament=cast(bool, kwargs["run_full_tournament"]),
+            defer_candidate_tournament=cast(bool, kwargs["defer_candidate_tournament"]),
+        )
+    if kind == "paired-heldout":
+        return _paired_heldout_for_seed(
+            _mapping(payload["root"], "job.root"),
+            Path(str(payload["output_root"])),
+            int(payload["seed"]),
+            _mapping(payload["diverse_row"], "job.diverse_row"),
+            games=int(payload["games"]),
+            workers=int(payload["workers"]),
+        )
+    if kind == "candidate-tournament":
+        return _complete_candidate_tournament(
+            _mapping(payload["root"], "job.root"),
+            Path(str(payload["output_root"])),
+            _mapping(payload["row"], "job.row"),
+            workers=int(payload["workers"]),
+            job_workers=int(payload["job_workers"]),
+            focused_games=int(payload["focused_games"]),
+        )
+    raise ValueError(f"unsupported process job kind: {kind}")
+
+
+def _process_job_entry(
+    result_queue: Any,
+    job_id: str,
+    kind: str,
+    payload: Mapping[str, object],
+) -> None:
+    try:
+        _limit_worker_threads()
+        result_queue.put((job_id, True, _execute_process_job(kind, payload)))
+    except BaseException as error:
+        result_queue.put(
+            (
+                job_id,
+                False,
+                f"{type(error).__name__}: {error}\n{traceback.format_exc()}",
+            )
+        )
+
+
+def _run_bounded_process_jobs(
+    jobs: Sequence[tuple[str, str, Mapping[str, object]]],
+    *,
+    max_workers: int,
+    stage_name: str,
+) -> dict[str, dict[str, object]]:
+    """Run independent experiment jobs in isolated, bounded worker processes."""
+    if max_workers < 1:
+        raise ValueError("job workers must be positive")
+    if not jobs:
+        return {}
+    _limit_worker_threads()
+    if max_workers == 1:
+        return {
+            job_id: _execute_process_job(kind, payload)
+            for job_id, kind, payload in jobs
+        }
+
+    context = mp.get_context("spawn")
+    result_queue = context.Queue()
+    pending = list(jobs)
+    active: dict[str, tuple[Any, float]] = {}
+    results: dict[str, dict[str, object]] = {}
+    next_job = 0
+    failure: str | None = None
+
+    def stop_active() -> None:
+        for process, _ in active.values():
+            if process.is_alive():
+                process.terminate()
+        for process, _ in active.values():
+            process.join()
+
+    try:
+        while pending or active:
+            while pending and len(active) < max_workers:
+                job_id, kind, payload = pending.pop(0)
+                process = context.Process(
+                    target=_process_job_entry,
+                    args=(result_queue, job_id, kind, payload),
+                )
+                process.daemon = False
+                process.start()
+                active[job_id] = (process, time.perf_counter())
+                next_job += 1
+                print(
+                    f"[{stage_name}] started {job_id} "
+                    f"({next_job} dispatched, {len(active)} active)",
+                    flush=True,
+                )
+
+            try:
+                job_id, succeeded, value = result_queue.get(timeout=0.5)
+            except queue.Empty:
+                exited_without_result = [
+                    job_id
+                    for job_id, (process, _) in active.items()
+                    if process.exitcode is not None
+                ]
+                if exited_without_result:
+                    job_id = exited_without_result[0]
+                    process, _ = active.pop(job_id)
+                    process.join()
+                    failure = (
+                        f"{stage_name} job {job_id} exited with code "
+                        f"{process.exitcode} without returning a result"
+                    )
+                    pending.clear()
+                continue
+
+            if job_id not in active:
+                raise RuntimeError(
+                    f"received an unknown {stage_name} job result: {job_id}"
+                )
+            process, started_at = active.pop(job_id)
+            process.join()
+            elapsed = time.perf_counter() - started_at
+            if not succeeded:
+                failure = f"{stage_name} job {job_id} failed:\n{value}"
+                pending.clear()
+                continue
+            if process.exitcode != 0:
+                failure = (
+                    f"{stage_name} job {job_id} returned a result but exited "
+                    f"with code {process.exitcode}"
+                )
+                pending.clear()
+                continue
+            results[job_id] = _mapping(value, f"{stage_name} result")
+            print(
+                f"[{stage_name}] completed {job_id} in {elapsed:.1f}s "
+                f"({len(active)} active)",
+                flush=True,
+            )
+        if failure is not None:
+            raise RuntimeError(failure)
+    except BaseException:
+        stop_active()
+        raise
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+    return results
+
+
+def _automatic_job_workers(
+    requested: int | None,
+    *,
+    workers: int,
+    rollout_workers: int,
+) -> int:
+    if requested is not None:
+        if requested < 1:
+            raise ValueError("job workers must be positive")
+        return requested
+    cpu_count = os.cpu_count() or 1
+    inner_workers = max(workers, rollout_workers)
+    return max(1, min(4, cpu_count // (inner_workers + 1)))
 
 
 def _league_config(
@@ -240,10 +450,14 @@ def _run_condition(
     focused_games: int,
     full_games: int,
     workers: int,
+    job_workers: int = 1,
     observation_override: str | None = None,
     training_override: Mapping[str, object] | None = None,
     run_full_tournament: bool = True,
+    defer_candidate_tournament: bool = False,
 ) -> dict[str, object]:
+    run_started = time.perf_counter()
+    timings: dict[str, float] = {}
     name = str(condition["name"])
     run_dir = output_root / name / f"seed-{seed}"
     checkpoint = run_dir / "checkpoint.pt"
@@ -283,10 +497,12 @@ def _run_condition(
         trainer = StabilityLeaguePPOTrainer(config, league_config=league_config)
     else:
         raise ValueError(f"unsupported stability trainer: {trainer_name}")
+    section_started = time.perf_counter()
     history = trainer.train(checkpoint)
     write_history(history_path, history)
     population = _population_payload(trainer)
     _write_json(population_path, population)
+    timings["training_and_checkpoint_seconds"] = time.perf_counter() - section_started
     snapshots: Sequence[Any] = ()
     archived: Sequence[Any] = ()
     warmup: Any | None = None
@@ -298,6 +514,7 @@ def _run_condition(
         warmup = trainer.league.warmup_anchor
         state_bank = trainer.league.state_bank
         response_signatures = trainer.league.response_signatures
+    section_started = time.perf_counter()
     evaluation, heldout = _evaluate(
         root,
         checkpoint,
@@ -306,45 +523,66 @@ def _run_condition(
         observation=ObservationFamily(observation_value),
         workers=workers,
     )
+    timings["rotated_evaluation_seconds"] = time.perf_counter() - section_started
     tournament_values = _mapping(root["tournament"], "tournament")
-    participants = build_participants(
-        checkpoint,
-        ObservationFamily(observation_value),
-        snapshots,
-        warmup,
-        include_snapshots=False,
-    )
-    focused_schedule = build_paired_schedule(
-        tuple(item.name for item in participants),
-        games=focused_games,
-        seed=int(tournament_values["seed"]) + seed,
-    )
+    focused: Any | None = None
+    focused_schedule: tuple[Any, ...] = ()
+    participants: tuple[TournamentParticipant, ...] = ()
     checkpoint_paths = {"final": checkpoint}
     if warmup is not None:
         checkpoint_paths[warmup.policy_id] = warmup.path
-    focused, focused_schedule = run_paired_round_robin(
-        participants,
-        games=focused_games,
-        seed=int(tournament_values["seed"]) + seed,
-        initial_rating=float(tournament_values["initial_rating"]),
-        k_factor=float(tournament_values["k_factor"]),
-        schedule=focused_schedule,
-        workers=workers,
-        checkpoint_paths=checkpoint_paths,
-    )
     direct = None
-    if warmup is not None:
-        final_participant = next(item for item in participants if item.name == "final")
-        direct = direct_final_warmup_comparison(
-            final_participant,
-            next(item for item in participants if item.name == warmup.policy_id),
-            tuple(item for item in participants if item.name in set(baseline_names)),
-            games=focused_games,
-            seed=int(tournament_values["seed"]) + seed + 900_000,
+    if not defer_candidate_tournament:
+        section_started = time.perf_counter()
+        participants = build_participants(
+            checkpoint,
+            ObservationFamily(observation_value),
+            snapshots,
+            warmup,
+            include_snapshots=False,
         )
+        focused_schedule = build_paired_schedule(
+            tuple(item.name for item in participants),
+            games=focused_games,
+            seed=int(tournament_values["seed"]) + seed,
+        )
+        focused, focused_schedule = run_paired_round_robin(
+            participants,
+            games=focused_games,
+            seed=int(tournament_values["seed"]) + seed,
+            initial_rating=float(tournament_values["initial_rating"]),
+            k_factor=float(tournament_values["k_factor"]),
+            schedule=focused_schedule,
+            workers=workers,
+            checkpoint_paths=checkpoint_paths,
+        )
+        timings["focused_tournament_seconds"] = time.perf_counter() - section_started
+        if warmup is not None:
+            section_started = time.perf_counter()
+            final_participant = next(
+                item for item in participants if item.name == "final"
+            )
+            direct = direct_final_warmup_comparison(
+                final_participant,
+                next(item for item in participants if item.name == warmup.policy_id),
+                tuple(
+                    item for item in participants if item.name in set(baseline_names)
+                ),
+                games=focused_games,
+                seed=int(tournament_values["seed"]) + seed + 900_000,
+            )
+            timings["direct_final_warmup_seconds"] = (
+                time.perf_counter() - section_started
+            )
+        else:
+            timings["direct_final_warmup_seconds"] = 0.0
+    else:
+        timings["focused_tournament_seconds"] = 0.0
+        timings["direct_final_warmup_seconds"] = 0.0
     full: Any | None = None
     full_schedule: tuple[Any, ...] = ()
     if run_full_tournament:
+        section_started = time.perf_counter()
         full_participants = build_participants(
             checkpoint,
             ObservationFamily(observation_value),
@@ -369,6 +607,12 @@ def _run_condition(
             workers=workers,
             checkpoint_paths=full_paths,
         )
+        timings["full_population_tournament_seconds"] = (
+            time.perf_counter() - section_started
+        )
+    else:
+        timings["full_population_tournament_seconds"] = 0.0
+    section_started = time.perf_counter()
     if state_bank is not None:
         diversity = analyze_snapshots(
             archived,
@@ -413,8 +657,11 @@ def _run_condition(
         diversity["archived_snapshots"] = [item.as_dict() for item in archived]
         diversity["active_snapshots"] = [item.as_dict() for item in snapshots]
         diversity["training_roster"] = list(baseline_names)
-        diversity["matchup_win_share_matrix"] = matchup_win_share_matrix(
-            focused if full is None else full
+        matchup_result = full if full is not None else focused
+        diversity["matchup_win_share_matrix"] = (
+            matchup_win_share_matrix(matchup_result)
+            if matchup_result is not None
+            else {}
         )
         diversity["non_transitive_cycles"] = non_transitive_cycles(
             cast(
@@ -427,14 +674,21 @@ def _run_condition(
             "policies": [],
             "active_population": {"policies": []},
             "training_roster": list(baseline_names),
-            "matchup_win_share_matrix": matchup_win_share_matrix(
-                focused if full is None else full
+            "matchup_win_share_matrix": (
+                matchup_win_share_matrix(full if full is not None else focused)
+                if full is not None or focused is not None
+                else {}
             ),
             "non_transitive_cycles": [],
         }
-    focused_elo = focused.elo
-    final_rating = _rating(focused_elo, "final")
-    warmup_rating = _rating(focused_elo, warmup.policy_id) if warmup else None
+    timings["diversity_analysis_seconds"] = time.perf_counter() - section_started
+    focused_elo = None if focused is None else focused.elo
+    final_rating = _rating(focused_elo, "final") if focused_elo is not None else None
+    warmup_rating = (
+        _rating(focused_elo, warmup.policy_id)
+        if focused_elo is not None and warmup
+        else None
+    )
     diversity["focused_tournament_elo"] = focused_elo
     diversity["full_tournament_elo"] = None if full is None else full.elo
     diversity["final_rating"] = final_rating
@@ -444,28 +698,16 @@ def _run_condition(
         if final_rating is not None and warmup_rating is not None
         else None
     )
-    _write_json(diversity_path, cast(Mapping[str, object], diversity))
-    _write_json(
-        tournament_path,
-        {
-            "focused": focused.as_dict(),
-            "focused_schedule": schedule_as_dict(focused_schedule),
-            "full_population": None if full is None else full.as_dict(),
-            "full_schedule": schedule_as_dict(full_schedule),
-            "direct_final_warmup": direct,
-        },
-    )
-    _write_json(
-        evaluation_path,
-        {
-            "experiment": str(root["experiment"]),
-            "condition": name,
-            "seed": seed,
-            "updates": updates,
-            "baseline": evaluation,
-            "heldout": heldout,
-        },
-    )
+    timings["total_seconds"] = time.perf_counter() - run_started
+    evaluation_payload: dict[str, object] = {
+        "experiment": str(root["experiment"]),
+        "condition": name,
+        "seed": seed,
+        "updates": updates,
+        "baseline": evaluation,
+        "heldout": heldout,
+        "timings": timings,
+    }
     manifest: dict[str, object] = {
         "experiment": str(root["experiment"]),
         "condition": name,
@@ -483,12 +725,35 @@ def _run_condition(
         "manifest": str(manifest_path),
         "fixed_final_update": updates,
         "focused_schedule_games": len(focused_schedule),
+        "focused_tournament_deferred": defer_candidate_tournament,
         "full_schedule_games": len(full_schedule),
         "full_tournament_skipped": not run_full_tournament,
         "tournament_workers": workers,
+        "job_workers": job_workers,
         "seat_balanced": True,
         "observation": observation_value,
+        "timings": timings,
     }
+    artifact_started = time.perf_counter()
+    _write_json(diversity_path, cast(Mapping[str, object], diversity))
+    _write_json(
+        tournament_path,
+        {
+            "focused": None if focused is None else focused.as_dict(),
+            "focused_schedule": schedule_as_dict(focused_schedule),
+            "full_population": None if full is None else full.as_dict(),
+            "full_schedule": schedule_as_dict(full_schedule),
+            "direct_final_warmup": direct,
+        },
+    )
+    _write_json(evaluation_path, evaluation_payload)
+    _write_json(manifest_path, manifest)
+    validate_followup_manifest(manifest)
+    timings["artifact_persistence_seconds"] = time.perf_counter() - artifact_started
+    timings["total_seconds"] = time.perf_counter() - run_started
+    evaluation_payload["timings"] = dict(timings)
+    manifest["timings"] = dict(timings)
+    _write_json(evaluation_path, evaluation_payload)
     _write_json(manifest_path, manifest)
     validate_followup_manifest(manifest)
     return {
@@ -505,10 +770,161 @@ def _run_condition(
         "active_mean_pairwise_action_disagreement": _active_metric(
             diversity, "mean_pairwise_action_disagreement"
         ),
-        "focused_tournament": focused.elo,
+        "focused_tournament": focused_elo,
         "full_tournament": None if full is None else full.elo,
         "direct_final_warmup": direct,
+        "candidate_tournament_deferred": defer_candidate_tournament,
         "observation": observation_value,
+        "timings": dict(timings),
+        "runtime_seconds": timings["total_seconds"],
+    }
+
+
+def _complete_candidate_tournament(
+    root: Mapping[str, object],
+    output_root: Path,
+    row: Mapping[str, object],
+    *,
+    workers: int,
+    job_workers: int,
+    focused_games: int,
+) -> dict[str, object]:
+    """Run gate-facing tournament metrics after screening selects a candidate."""
+    started = time.perf_counter()
+    condition = str(row["condition"])
+    seed = int(row["seed"])
+    run_dir = output_root / condition / f"seed-{seed}"
+    checkpoint = run_dir / "checkpoint.pt"
+    population = _mapping(
+        json.loads((run_dir / "population.json").read_text(encoding="utf-8")),
+        "candidate population",
+    )
+    diversity = _mapping(
+        json.loads((run_dir / "diversity.json").read_text(encoding="utf-8")),
+        "candidate diversity",
+    )
+    evaluation = _mapping(
+        json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8")),
+        "candidate evaluation",
+    )
+    tournament = _mapping(
+        json.loads((run_dir / "tournament.json").read_text(encoding="utf-8")),
+        "candidate tournament",
+    )
+    manifest = _mapping(
+        json.loads((run_dir / "manifest.json").read_text(encoding="utf-8")),
+        "candidate manifest",
+    )
+
+    warmup_value = population.get("warmup_anchor")
+    warmup: Any | None = None
+    if isinstance(warmup_value, Mapping):
+        warmup = SimpleNamespace(
+            policy_id=str(warmup_value["policy_id"]),
+            path=Path(str(warmup_value["checkpoint"])),
+            observation=ObservationFamily(str(warmup_value["observation"])),
+        )
+    observation = ObservationFamily(str(row["observation"]))
+    participants = build_participants(
+        checkpoint,
+        observation,
+        (),
+        warmup,
+        include_snapshots=False,
+    )
+    tournament_values = _mapping(root["tournament"], "tournament")
+    tournament_seed = int(tournament_values["seed"]) + seed
+    schedule = build_paired_schedule(
+        tuple(item.name for item in participants),
+        games=focused_games,
+        seed=tournament_seed,
+    )
+    checkpoint_paths = {"final": checkpoint}
+    if warmup is not None:
+        checkpoint_paths[warmup.policy_id] = warmup.path
+    focused, schedule = run_paired_round_robin(
+        participants,
+        games=focused_games,
+        seed=tournament_seed,
+        initial_rating=float(tournament_values["initial_rating"]),
+        k_factor=float(tournament_values["k_factor"]),
+        schedule=schedule,
+        workers=workers,
+        checkpoint_paths=checkpoint_paths,
+    )
+
+    direct = None
+    if warmup is not None:
+        final_participant = next(item for item in participants if item.name == "final")
+        warmup_participant = next(
+            item for item in participants if item.name == warmup.policy_id
+        )
+        baseline_names = set(
+            _strings(
+                _mapping(root["opponents"], "opponents")["training"],
+                "opponents.training",
+            )
+        )
+        direct = direct_final_warmup_comparison(
+            final_participant,
+            warmup_participant,
+            tuple(item for item in participants if item.name in baseline_names),
+            games=focused_games,
+            seed=int(tournament_values["seed"]) + seed + 900_000,
+        )
+
+    focused_elo = focused.elo
+    final_rating = _rating(focused_elo, "final")
+    warmup_rating = _rating(focused_elo, warmup.policy_id) if warmup else None
+    diversity["focused_tournament_elo"] = focused_elo
+    diversity["final_rating"] = final_rating
+    diversity["warmup_rating"] = warmup_rating
+    diversity["final_minus_warmup_elo"] = (
+        final_rating - warmup_rating
+        if final_rating is not None and warmup_rating is not None
+        else None
+    )
+    if tournament.get("full_population") is None:
+        diversity["matchup_win_share_matrix"] = matchup_win_share_matrix(focused)
+        diversity["non_transitive_cycles"] = non_transitive_cycles(
+            cast(
+                Mapping[str, Mapping[str, float]],
+                diversity["matchup_win_share_matrix"],
+            )
+        )
+
+    tournament["focused"] = focused.as_dict()
+    tournament["focused_schedule"] = schedule_as_dict(schedule)
+    tournament["direct_final_warmup"] = direct
+    manifest["focused_schedule_games"] = len(schedule)
+    manifest["focused_tournament_deferred"] = False
+    manifest["job_workers"] = job_workers
+
+    timings = dict(_mapping(manifest.get("timings", {}), "candidate timings"))
+    previous_total = float(timings.get("total_seconds", 0.0))
+    elapsed = time.perf_counter() - started
+    timings["selected_candidate_tournament_seconds"] = elapsed
+    timings["total_seconds"] = previous_total + elapsed
+    manifest["timings"] = timings
+    evaluation["timings"] = dict(timings)
+
+    _write_json(run_dir / "diversity.json", diversity)
+    _write_json(run_dir / "tournament.json", tournament)
+    _write_json(run_dir / "evaluation.json", evaluation)
+    _write_json(run_dir / "manifest.json", manifest)
+    validate_followup_manifest(manifest)
+
+    return {
+        **dict(row),
+        "final_rating": final_rating,
+        "warmup_rating": warmup_rating,
+        "final_minus_warmup_elo": diversity["final_minus_warmup_elo"],
+        "focused_tournament": focused_elo,
+        "full_tournament": diversity.get("full_tournament_elo"),
+        "direct_final_warmup": direct,
+        "candidate_tournament_deferred": False,
+        "timings": timings,
+        "runtime_seconds": timings["total_seconds"],
     }
 
 
@@ -530,26 +946,18 @@ def _normal_interval(values: Sequence[float]) -> list[float]:
     return [mean - margin, mean + margin]
 
 
-def _paired_heldout_comparisons(
+def _paired_heldout_for_seed(
     root: Mapping[str, object],
     output_root: Path,
-    rows: Sequence[Mapping[str, object]],
+    seed: int,
+    diverse_row: Mapping[str, object],
     *,
     games: int,
-    workers: int = 1,
-) -> list[dict[str, object]]:
-    """Run common-seed held-out comparisons for the diversity gate."""
-    latest = {
-        int(row["seed"]): row
-        for row in rows
-        if row.get("condition") == "balanced_latest_only"
-    }
-    diverse_name = _selected_condition_name(root, rows)
-    diverse = {
-        int(row["seed"]): row for row in rows if row.get("condition") == diverse_name
-    }
-    if not latest or not diverse:
-        return []
+    workers: int,
+) -> dict[str, object]:
+    """Evaluate one seed's common-random-number held-out comparison."""
+    started = time.perf_counter()
+    diverse_name = str(diverse_row["condition"])
     evaluation = _mapping(root["evaluation"], "evaluation")
     heldout_bases = _ints(
         evaluation["heldout_seed_bases"], "evaluation.heldout_seed_bases"
@@ -558,31 +966,77 @@ def _paired_heldout_comparisons(
     latest_observation = ObservationFamily(
         str(_mapping(root["env"], "env")["observation"])
     )
-    comparisons: list[dict[str, object]] = []
+    latest_path = (
+        output_root / "balanced_latest_only" / f"seed-{seed}" / "checkpoint.pt"
+    )
+    diverse_path = output_root / diverse_name / f"seed-{seed}" / "checkpoint.pt"
+    diverse_observation = ObservationFamily(str(diverse_row["observation"]))
+    paired = run_paired_rotated_evaluation(
+        _cached_policy(diverse_path),
+        _cached_policy(latest_path),
+        baseline_factories() | heldout_factories(),
+        games=games,
+        seed_bases=tuple(base + seed * 10_000 for base in heldout_bases),
+        observation=latest_observation,
+        first_observation=diverse_observation,
+        second_observation=latest_observation,
+        matchups=matchups,
+        first_name="response_diverse",
+        second_name="latest_only",
+        workers=workers,
+        checkpoint_paths=(diverse_path, latest_path),
+    )
+    return {
+        "seed": seed,
+        **paired.as_dict(),
+        "runtime_seconds": time.perf_counter() - started,
+    }
+
+
+def _paired_heldout_comparisons(
+    root: Mapping[str, object],
+    output_root: Path,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    games: int,
+    workers: int = 1,
+    job_workers: int = 1,
+) -> list[dict[str, object]]:
+    """Run common-seed held-out comparisons for the diversity gate."""
+    latest_seeds = {
+        int(row["seed"])
+        for row in rows
+        if row.get("condition") == "balanced_latest_only"
+    }
+    diverse_name = _selected_condition_name(root, rows)
+    diverse = {
+        int(row["seed"]): row for row in rows if row.get("condition") == diverse_name
+    }
+    if not latest_seeds or not diverse:
+        return []
+    jobs: list[tuple[str, str, Mapping[str, object]]] = []
     for seed, diverse_row in sorted(diverse.items()):
-        if seed not in latest:
+        if seed not in latest_seeds:
             continue
-        latest_path = (
-            output_root / "balanced_latest_only" / f"seed-{seed}" / "checkpoint.pt"
+        job_id = f"seed-{seed}"
+        jobs.append(
+            (
+                job_id,
+                "paired-heldout",
+                {
+                    "root": root,
+                    "output_root": str(output_root),
+                    "seed": seed,
+                    "diverse_row": diverse_row,
+                    "games": games,
+                    "workers": workers,
+                },
+            )
         )
-        diverse_path = output_root / diverse_name / f"seed-{seed}" / "checkpoint.pt"
-        diverse_observation = ObservationFamily(str(diverse_row["observation"]))
-        paired = run_paired_rotated_evaluation(
-            _cached_policy(diverse_path),
-            _cached_policy(latest_path),
-            baseline_factories() | heldout_factories(),
-            games=games,
-            seed_bases=tuple(base + seed * 10_000 for base in heldout_bases),
-            observation=latest_observation,
-            first_observation=diverse_observation,
-            second_observation=latest_observation,
-            matchups=matchups,
-            first_name="response_diverse",
-            second_name="latest_only",
-            workers=workers,
-            checkpoint_paths=(diverse_path, latest_path),
-        )
-        comparisons.append({"seed": seed, **paired.as_dict()})
+    result_map = _run_bounded_process_jobs(
+        jobs, max_workers=job_workers, stage_name="paired-heldout"
+    )
+    comparisons = [result_map[job_id] for job_id, _, _ in jobs]
     _write_json(
         output_root / "paired-heldout-comparisons.json",
         {"comparisons": comparisons},
@@ -817,6 +1271,15 @@ def main() -> None:
     )
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--rollout-workers", type=int, default=None)
+    parser.add_argument(
+        "--job-workers",
+        type=int,
+        default=None,
+        help=(
+            "maximum independent condition/seed jobs to run at once; by default "
+            "uses a CPU-budgeted value capped at four"
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument(
@@ -923,15 +1386,31 @@ def main() -> None:
             {"decision": "evaluated", "results": mappo_rows},
         )
         return
+    job_workers = _automatic_job_workers(
+        args.job_workers, workers=workers, rollout_workers=rollout_workers
+    )
+    cpu_count = os.cpu_count() or 1
+    print(
+        f"[{args.stage}] job workers={job_workers}, evaluation workers={workers}, "
+        f"rollout workers={rollout_workers}, logical CPUs={cpu_count}, "
+        "numerical-library threads per process=1",
+        flush=True,
+    )
+    stage_started = time.perf_counter()
     conditions = [
         _mapping(item, f"{args.stage}.condition[{index}]")
         for index, item in enumerate(
             _list(stage["conditions"], f"{args.stage}.conditions")
         )
     ]
-    rows: list[dict[str, object]] = []
+    base_order: list[str] = []
+    base_rows: dict[str, dict[str, object]] = {}
+    base_jobs: list[tuple[str, str, Mapping[str, object]]] = []
     for condition in conditions:
         for seed in seeds:
+            condition_name = str(condition["name"])
+            job_id = f"{condition_name}:seed-{seed}"
+            base_order.append(job_id)
             run_dir = output_root / args.stage / str(condition["name"]) / f"seed-{seed}"
             manifest_path = run_dir / "manifest.json"
             if args.resume and manifest_path.is_file():
@@ -953,53 +1432,85 @@ def main() -> None:
                         ),
                         "resume diversity",
                     )
-                    rows.append(
-                        {
-                            "condition": condition["name"],
-                            "seed": seed,
-                            "baseline": _mapping(evaluation["baseline"], "baseline")[
-                                "summary"
-                            ],
-                            "heldout": _mapping(evaluation["heldout"], "heldout")[
-                                "summary"
-                            ],
-                            "final_rating": diversity.get("final_rating"),
-                            "warmup_rating": diversity.get("warmup_rating"),
-                            "final_minus_warmup_elo": diversity.get(
-                                "final_minus_warmup_elo"
-                            ),
-                            "active_mean_pairwise_js_divergence": _active_metric(
-                                diversity, "mean_pairwise_js_divergence"
-                            ),
-                            "active_mean_pairwise_action_disagreement": _active_metric(
-                                diversity, "mean_pairwise_action_disagreement"
-                            ),
-                            "observation": manifest.get(
-                                "observation",
-                                _mapping(root["env"], "env")["observation"],
-                            ),
-                        }
+                    tournament = _mapping(
+                        json.loads(
+                            (run_dir / "tournament.json").read_text(encoding="utf-8")
+                        ),
+                        "resume tournament",
                     )
+                    base_rows[job_id] = {
+                        "condition": condition["name"],
+                        "seed": seed,
+                        "baseline": _mapping(evaluation["baseline"], "baseline")[
+                            "summary"
+                        ],
+                        "heldout": _mapping(evaluation["heldout"], "heldout")[
+                            "summary"
+                        ],
+                        "final_rating": diversity.get("final_rating"),
+                        "warmup_rating": diversity.get("warmup_rating"),
+                        "final_minus_warmup_elo": diversity.get(
+                            "final_minus_warmup_elo"
+                        ),
+                        "active_mean_pairwise_js_divergence": _active_metric(
+                            diversity, "mean_pairwise_js_divergence"
+                        ),
+                        "active_mean_pairwise_action_disagreement": _active_metric(
+                            diversity, "mean_pairwise_action_disagreement"
+                        ),
+                        "focused_tournament": diversity.get("focused_tournament_elo"),
+                        "full_tournament": diversity.get("full_tournament_elo"),
+                        "direct_final_warmup": tournament.get("direct_final_warmup"),
+                        "candidate_tournament_deferred": manifest.get(
+                            "focused_tournament_deferred", False
+                        ),
+                        "observation": manifest.get(
+                            "observation",
+                            _mapping(root["env"], "env")["observation"],
+                        ),
+                        "timings": _mapping(
+                            manifest.get("timings", {}), "resume timings"
+                        ),
+                    }
                     continue
             observation_override = (
                 str(condition["observation"]) if "observation" in condition else None
             )
-            rows.append(
-                _run_condition(
-                    root,
-                    condition,
-                    seed,
-                    output_root / args.stage,
-                    updates=updates,
-                    games=games,
-                    focused_games=focused_games,
-                    full_games=full_games,
-                    workers=workers,
-                    observation_override=observation_override,
-                    training_override=training_override,
-                    run_full_tournament=not args.skip_full_population_tournament,
+            base_jobs.append(
+                (
+                    job_id,
+                    "condition",
+                    {
+                        "root": root,
+                        "condition": condition,
+                        "seed": seed,
+                        "output_root": str(output_root / args.stage),
+                        "kwargs": {
+                            "updates": updates,
+                            "games": games,
+                            "focused_games": focused_games,
+                            "full_games": full_games,
+                            "workers": workers,
+                            "job_workers": job_workers,
+                            "observation_override": observation_override,
+                            "training_override": training_override,
+                            "run_full_tournament": (
+                                not args.skip_full_population_tournament
+                            ),
+                            "defer_candidate_tournament": True,
+                        },
+                    },
                 )
             )
+    base_started = time.perf_counter()
+    base_rows.update(
+        _run_bounded_process_jobs(
+            base_jobs, max_workers=job_workers, stage_name="condition-seed"
+        )
+    )
+    base_condition_jobs_seconds = time.perf_counter() - base_started
+    rows = [base_rows[job_id] for job_id in base_order]
+    fallback_condition_jobs_seconds = 0.0
     if _fallback_is_required(root, rows):
         fallback_values = _mapping(root["fallback"], "fallback")
         fallback_condition: dict[str, object] = {
@@ -1008,14 +1519,15 @@ def main() -> None:
             "observation": str(fallback_values["observation"]),
             "population": {"retention_strategy": "novelty"},
         }
-        fallback_rows: list[dict[str, object]] = []
+        fallback_name = str(fallback_condition["name"])
+        fallback_order: list[str] = []
+        fallback_rows_by_id: dict[str, dict[str, object]] = {}
+        fallback_jobs: list[tuple[str, str, Mapping[str, object]]] = []
+        fallback_started = time.perf_counter()
         for seed in seeds:
-            fallback_dir = (
-                output_root
-                / args.stage
-                / str(fallback_condition["name"])
-                / f"seed-{seed}"
-            )
+            job_id = f"{fallback_name}:seed-{seed}"
+            fallback_order.append(job_id)
+            fallback_dir = output_root / args.stage / fallback_name / f"seed-{seed}"
             if args.resume and (fallback_dir / "manifest.json").is_file():
                 manifest = _mapping(
                     json.loads(
@@ -1041,47 +1553,81 @@ def main() -> None:
                         ),
                         "fallback diversity",
                     )
-                    fallback_rows.append(
-                        {
-                            "condition": fallback_condition["name"],
-                            "seed": seed,
-                            "baseline": _mapping(evaluation["baseline"], "baseline")[
-                                "summary"
-                            ],
-                            "heldout": _mapping(evaluation["heldout"], "heldout")[
-                                "summary"
-                            ],
-                            "final_rating": diversity.get("final_rating"),
-                            "warmup_rating": diversity.get("warmup_rating"),
-                            "final_minus_warmup_elo": diversity.get(
-                                "final_minus_warmup_elo"
-                            ),
-                            "active_mean_pairwise_js_divergence": _active_metric(
-                                diversity, "mean_pairwise_js_divergence"
-                            ),
-                            "active_mean_pairwise_action_disagreement": _active_metric(
-                                diversity, "mean_pairwise_action_disagreement"
-                            ),
-                            "observation": fallback_condition["observation"],
-                        }
+                    tournament = _mapping(
+                        json.loads(
+                            (fallback_dir / "tournament.json").read_text(
+                                encoding="utf-8"
+                            )
+                        ),
+                        "fallback tournament",
                     )
+                    fallback_rows_by_id[job_id] = {
+                        "condition": fallback_condition["name"],
+                        "seed": seed,
+                        "baseline": _mapping(evaluation["baseline"], "baseline")[
+                            "summary"
+                        ],
+                        "heldout": _mapping(evaluation["heldout"], "heldout")[
+                            "summary"
+                        ],
+                        "final_rating": diversity.get("final_rating"),
+                        "warmup_rating": diversity.get("warmup_rating"),
+                        "final_minus_warmup_elo": diversity.get(
+                            "final_minus_warmup_elo"
+                        ),
+                        "active_mean_pairwise_js_divergence": _active_metric(
+                            diversity, "mean_pairwise_js_divergence"
+                        ),
+                        "active_mean_pairwise_action_disagreement": _active_metric(
+                            diversity, "mean_pairwise_action_disagreement"
+                        ),
+                        "focused_tournament": diversity.get("focused_tournament_elo"),
+                        "full_tournament": diversity.get("full_tournament_elo"),
+                        "direct_final_warmup": tournament.get("direct_final_warmup"),
+                        "candidate_tournament_deferred": manifest.get(
+                            "focused_tournament_deferred", False
+                        ),
+                        "observation": fallback_condition["observation"],
+                        "timings": _mapping(
+                            manifest.get("timings", {}), "fallback resume timings"
+                        ),
+                    }
                     continue
-            fallback_rows.append(
-                _run_condition(
-                    root,
-                    fallback_condition,
-                    seed,
-                    output_root / args.stage,
-                    updates=updates,
-                    games=games,
-                    focused_games=focused_games,
-                    full_games=full_games,
-                    workers=workers,
-                    observation_override=str(fallback_values["observation"]),
-                    training_override=training_override,
-                    run_full_tournament=not args.skip_full_population_tournament,
+            fallback_jobs.append(
+                (
+                    job_id,
+                    "condition",
+                    {
+                        "root": root,
+                        "condition": fallback_condition,
+                        "seed": seed,
+                        "output_root": str(output_root / args.stage),
+                        "kwargs": {
+                            "updates": updates,
+                            "games": games,
+                            "focused_games": focused_games,
+                            "full_games": full_games,
+                            "workers": workers,
+                            "job_workers": job_workers,
+                            "observation_override": str(fallback_values["observation"]),
+                            "training_override": training_override,
+                            "run_full_tournament": (
+                                not args.skip_full_population_tournament
+                            ),
+                            "defer_candidate_tournament": True,
+                        },
+                    },
                 )
             )
+        fallback_rows_by_id.update(
+            _run_bounded_process_jobs(
+                fallback_jobs,
+                max_workers=job_workers,
+                stage_name="fallback-condition-seed",
+            )
+        )
+        fallback_condition_jobs_seconds = time.perf_counter() - fallback_started
+        fallback_rows = [fallback_rows_by_id[job_id] for job_id in fallback_order]
         rows.extend(fallback_rows)
         _write_json(
             output_root / args.stage / "fallback-decision.json",
@@ -1099,10 +1645,68 @@ def main() -> None:
             output_root / args.stage / "fallback-decision.json",
             {"required": False, "condition": None},
         )
-    paired = _paired_heldout_comparisons(
-        root, output_root / args.stage, rows, games=games, workers=workers
+    selected_name = _selected_condition_name(root, rows)
+    candidate_jobs: list[tuple[str, str, Mapping[str, object]]] = []
+    for row in rows:
+        if (
+            row.get("condition") != selected_name
+            or row.get("candidate_tournament_deferred") is not True
+        ):
+            continue
+        seed = int(row["seed"])
+        job_id = f"{selected_name}:seed-{seed}"
+        candidate_jobs.append(
+            (
+                job_id,
+                "candidate-tournament",
+                {
+                    "root": root,
+                    "output_root": str(output_root / args.stage),
+                    "row": row,
+                    "workers": workers,
+                    "job_workers": job_workers,
+                    "focused_games": focused_games,
+                },
+            )
+        )
+    candidate_started = time.perf_counter()
+    candidate_results = _run_bounded_process_jobs(
+        candidate_jobs,
+        max_workers=job_workers,
+        stage_name="selected-candidate-tournament",
     )
+    rows = [
+        candidate_results.get(f"{row['condition']}:seed-{row['seed']}", row)
+        for row in rows
+    ]
+    selected_candidate_tournaments_seconds = time.perf_counter() - candidate_started
+    paired_started = time.perf_counter()
+    paired = _paired_heldout_comparisons(
+        root,
+        output_root / args.stage,
+        rows,
+        games=games,
+        workers=workers,
+        job_workers=job_workers,
+    )
+    paired_heldout_seconds = time.perf_counter() - paired_started
     aggregate = _aggregate(root, rows, paired)
+    runtime = {
+        "base_condition_jobs_seconds": base_condition_jobs_seconds,
+        "fallback_condition_jobs_seconds": fallback_condition_jobs_seconds,
+        "selected_candidate_tournaments_seconds": (
+            selected_candidate_tournaments_seconds
+        ),
+        "paired_heldout_seconds": paired_heldout_seconds,
+        "total_seconds": time.perf_counter() - stage_started,
+    }
+    execution = {
+        "job_workers": job_workers,
+        "evaluation_workers_per_job": workers,
+        "rollout_workers_per_job": rollout_workers,
+        "logical_cpu_count": cpu_count,
+        "numerical_library_threads_per_process": 1,
+    }
     _write_json(
         output_root / f"{args.stage}-summary.json",
         {
@@ -1110,6 +1714,8 @@ def main() -> None:
             "stage": args.stage,
             "seeds": list(seeds),
             "updates": updates,
+            "execution": execution,
+            "timings": runtime,
             "results": rows,
             "paired_heldout": paired,
             **aggregate,
@@ -1120,6 +1726,8 @@ def main() -> None:
         {
             "experiment": str(root["experiment"]),
             "stage": args.stage,
+            "execution": execution,
+            "timings": runtime,
             "results": rows,
             "paired_heldout": paired,
             **aggregate,
